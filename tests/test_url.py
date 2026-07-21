@@ -141,6 +141,133 @@ class TestAssertPublicIPPrivateRanges:
             assert_public_ip("192.168.2.10", allowlist_ranges=["192.168.1.0/24"])
 
 
+class TestAssertPublicIPSharedAddressSpace:
+    """CGNAT / RFC 6598 — the range a property-only check let through.
+
+    `100.64.0.0/10` reports `is_private=False` on current CPython (verified on
+    3.12.13 and 3.14.6), so the original property-only implementation ALLOWED
+    it. It is routable internal space at cloud providers, carrier NATs and
+    overlay networks (Tailscale uses exactly this range), so it is a live SSRF
+    target. Regression test for that gap.
+    """
+
+    @pytest.mark.parametrize(
+        "cgnat_ip",
+        [
+            "100.64.0.0",        # first address in the range
+            "100.64.0.1",        # the reported case
+            "100.100.100.100",   # mid-range
+            "100.127.255.255",   # last address in the range
+        ],
+    )
+    def test_rejects_cgnat(self, cgnat_ip):
+        with pytest.raises(UnsafeURL):
+            assert_public_ip(cgnat_ip)
+
+    @pytest.mark.parametrize(
+        "public_neighbour",
+        [
+            "100.63.255.255",  # one below 100.64.0.0 — must still be allowed
+            "100.128.0.0",     # one above 100.127.255.255 — must still be allowed
+        ],
+    )
+    def test_boundary_neighbours_still_allowed(self, public_neighbour):
+        """NEGATIVE CONTROL: the block must not bleed past the /10 boundary.
+
+        An over-broad blocklist breaks legitimate fetches and teaches people to
+        bypass the guard, so the edges matter as much as the range itself.
+        """
+        assert_public_ip(public_neighbour)
+
+    def test_allowlist_can_override_cgnat(self):
+        """An on-prem/overlay tenant legitimately running CGNAT can opt in."""
+        assert_public_ip("100.64.5.5", allowlist_ranges=["100.64.0.0/10"])
+
+
+class TestAssertPublicIPEmbeddedIPv4:
+    """IPv4 tunnelled inside IPv6 must be validated on the INNER address."""
+
+    @pytest.mark.parametrize(
+        "tunnelled",
+        [
+            "::ffff:10.0.0.1",           # IPv4-mapped, RFC1918 inside
+            "::ffff:127.0.0.1",          # IPv4-mapped loopback
+            "::ffff:100.64.0.1",         # IPv4-mapped CGNAT
+            "::ffff:169.254.169.254",    # IPv4-mapped cloud metadata
+            "2002:a00:1::",              # 6to4 wrapping 10.0.0.1
+            "2002:6440:1::",             # 6to4 wrapping 100.64.0.1
+            "64:ff9b::a00:1",            # NAT64 wrapping 10.0.0.1
+            "64:ff9b::6440:1",           # NAT64 wrapping 100.64.0.1
+        ],
+    )
+    def test_rejects_private_ipv4_inside_ipv6(self, tunnelled):
+        with pytest.raises(UnsafeURL):
+            assert_public_ip(tunnelled)
+
+    def test_public_ipv4_mapped_still_allowed(self):
+        """NEGATIVE CONTROL: a mapped PUBLIC address is not collateral damage."""
+        assert_public_ip("::ffff:8.8.8.8")
+
+
+class TestAssertPublicIPSpecialPurposeTable:
+    """Table-driven sweep of IANA special-purpose ranges.
+
+    Enumerated so a range cannot be silently forgotten the way CGNAT was. Each
+    entry is one representative address from a range that must never be
+    fetchable.
+    """
+
+    @pytest.mark.parametrize(
+        "addr,label",
+        [
+            ("0.0.0.0", "this-network"),
+            ("10.0.0.1", "rfc1918-10"),
+            ("100.64.0.1", "cgnat"),
+            ("127.0.0.1", "loopback"),
+            ("169.254.0.1", "link-local"),
+            ("172.16.0.1", "rfc1918-172"),
+            ("192.0.0.1", "ietf-protocol"),
+            ("192.0.2.1", "test-net-1"),
+            ("192.168.0.1", "rfc1918-192"),
+            ("198.18.0.1", "benchmarking"),
+            ("198.51.100.1", "test-net-2"),
+            ("203.0.113.1", "test-net-3"),
+            ("224.0.0.1", "multicast"),
+            ("240.0.0.1", "reserved-class-e"),
+            ("255.255.255.255", "broadcast"),
+            ("::", "v6-unspecified"),
+            ("::1", "v6-loopback"),
+            ("100::1", "v6-discard"),
+            ("2001:db8::1", "v6-documentation"),
+            ("fc00::1", "v6-unique-local"),
+            ("fd00::1", "v6-unique-local-fd"),
+            ("fe80::1", "v6-link-local"),
+            ("ff02::1", "v6-multicast"),
+        ],
+    )
+    def test_special_purpose_range_is_blocked(self, addr, label):
+        with pytest.raises(UnsafeURL):
+            assert_public_ip(addr)
+
+    @pytest.mark.parametrize(
+        "addr,label",
+        [
+            ("8.8.8.8", "google-dns"),
+            ("1.1.1.1", "cloudflare-dns"),
+            ("140.82.121.4", "github-api"),
+            ("2606:4700:4700::1111", "cloudflare-dns-v6"),
+            ("2001:4860:4860::8888", "google-dns-v6"),
+        ],
+    )
+    def test_genuinely_public_still_allowed(self, addr, label):
+        """NEGATIVE CONTROL: real vendor endpoints must keep working.
+
+        A blocklist that also blocks these would break every connector that
+        depends on this package.
+        """
+        assert_public_ip(addr)
+
+
 class TestAssertPublicIPDNSRebinding:
     def test_hostname_resolving_to_private_ip_blocked(self):
         # Simulate DNS rebinding: a "public" hostname resolves to 10.0.0.1

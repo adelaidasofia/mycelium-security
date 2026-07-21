@@ -6,6 +6,10 @@ Defends against:
   - URL parser confusion (backslash / tab / CR / LF / null / embedded creds)
   - DNS rebinding (caller pins resolved IP via resolve_pinned for fetch lifetime)
   - Private network probing (IPv4 + IPv6 private / link-local / loopback blocked)
+  - Shared address space / CGNAT (100.64.0.0/10, RFC 6598) — routable internal
+    space at cloud providers, carrier NATs and overlay networks
+  - IPv4 tunnelled inside IPv6 (IPv4-mapped / 6to4 / Teredo / NAT64) — the inner
+    address is validated too, so ``::ffff:10.0.0.1`` cannot smuggle a private target
 
 Usage:
     from urllib.parse import urlparse
@@ -69,21 +73,108 @@ def sanitize_or_raise(url: str) -> str:
     return url
 
 
+# Explicit IANA special-purpose ranges.
+#
+# WHY AN EXPLICIT LIST AND NOT JUST THE `ipaddress` PROPERTIES:
+# the stdlib properties are a moving target. CPython has revised what
+# `is_private` / `is_global` mean (notably the CVE-2024-4032 correction to the
+# special-purpose registries), so the SAME code can classify an address
+# differently across the Python versions this package supports (>=3.10).
+# A security blocklist must not silently change shape with the interpreter.
+#
+# Concretely: `100.64.0.0/10` (RFC 6598 "Shared Address Space", carrier-grade
+# NAT) reports `is_private=False` on current CPython, so a property-only check
+# ALLOWED it — verified on 3.12.13 and 3.14.6. That range is routable internal
+# space at cloud providers, carrier NATs, and overlay networks (Tailscale uses
+# exactly it), which makes it a live SSRF target rather than dead space.
+#
+# These entries are deterministic and auditable. The property checks below are
+# KEPT as defence-in-depth, so anything the list misses still has a second net.
+_BLOCKED_V4_NETWORKS: tuple[str, ...] = (
+    "0.0.0.0/8",          # "this network" (RFC 1122)
+    "10.0.0.0/8",         # RFC 1918 private
+    "100.64.0.0/10",      # RFC 6598 shared address space / CGNAT  <- the gap
+    "127.0.0.0/8",        # loopback
+    "169.254.0.0/16",     # link-local (incl. cloud metadata)
+    "172.16.0.0/12",      # RFC 1918 private
+    "192.0.0.0/24",       # IETF protocol assignments
+    "192.0.2.0/24",       # TEST-NET-1
+    "192.168.0.0/16",     # RFC 1918 private
+    "198.18.0.0/15",      # benchmarking (RFC 2544)
+    "198.51.100.0/24",    # TEST-NET-2
+    "203.0.113.0/24",     # TEST-NET-3
+    "224.0.0.0/4",        # multicast
+    "240.0.0.0/4",        # reserved (class E), incl. 255.255.255.255
+)
+
+_BLOCKED_V6_NETWORKS: tuple[str, ...] = (
+    "::/128",             # unspecified
+    "::1/128",            # loopback
+    "64:ff9b::/96",       # NAT64 (embeds an IPv4 address)
+    "100::/64",           # discard-only
+    "2001:db8::/32",      # documentation
+    "fc00::/7",           # unique-local
+    "fe80::/10",          # link-local
+    "ff00::/8",           # multicast
+)
+
+_BLOCKED_NETS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = tuple(
+    ipaddress.ip_network(c) for c in (*_BLOCKED_V4_NETWORKS, *_BLOCKED_V6_NETWORKS)
+)
+
+
+def _embedded_ipv4(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> ipaddress.IPv4Address | None:
+    """Extract the IPv4 address tunnelled inside an IPv6 address, if any.
+
+    IPv4-mapped (``::ffff:10.0.0.1``), 6to4 (``2002:a00:1::``) and Teredo all
+    carry an IPv4 address inside an IPv6 one. Checking only the outer IPv6
+    form can miss a private target, so callers must validate the INNER address
+    too. This is the bypass shape a property-only check cannot see.
+    """
+    if not isinstance(ip, ipaddress.IPv6Address):
+        return None
+    for attr in ("ipv4_mapped", "sixtofour"):
+        inner = getattr(ip, attr, None)
+        if inner is not None:
+            return inner
+    teredo = getattr(ip, "teredo", None)
+    if teredo:
+        # (server, client) — the client address is the interesting half.
+        return teredo[1]
+    if ip in ipaddress.ip_network("64:ff9b::/96"):
+        return ipaddress.ip_address(int(ip) & 0xFFFFFFFF)
+    return None
+
+
 def _is_metadata_endpoint(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    return str(ip) in _METADATA_IPS
+    if str(ip) in _METADATA_IPS:
+        return True
+    inner = _embedded_ipv4(ip)
+    return inner is not None and str(inner) in _METADATA_IPS
 
 
 def _is_private_or_reserved(
     ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
 ) -> bool:
-    return (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-    )
+    candidates: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = [ip]
+    inner = _embedded_ipv4(ip)
+    if inner is not None:
+        candidates.append(inner)
+    for candidate in candidates:
+        if any(candidate in net for net in _BLOCKED_NETS):
+            return True
+        if (
+            candidate.is_private
+            or candidate.is_loopback
+            or candidate.is_link_local
+            or candidate.is_multicast
+            or candidate.is_reserved
+            or candidate.is_unspecified
+        ):
+            return True
+    return False
 
 
 def _resolve_all(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
