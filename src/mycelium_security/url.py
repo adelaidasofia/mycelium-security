@@ -45,6 +45,8 @@ _METADATA_IPS: frozenset[str] = frozenset(
     }
 )
 
+_NAT64_NETWORK = ipaddress.ip_network("64:ff9b::/96")
+
 
 def sanitize_or_raise(url: str) -> str:
     """Validate a URL string. Return the (unchanged) URL or raise UnsafeURL.
@@ -110,7 +112,6 @@ _BLOCKED_V4_NETWORKS: tuple[str, ...] = (
 _BLOCKED_V6_NETWORKS: tuple[str, ...] = (
     "::/128",             # unspecified
     "::1/128",            # loopback
-    "64:ff9b::/96",       # NAT64 (embeds an IPv4 address)
     "100::/64",           # discard-only
     "2001:db8::/32",      # documentation
     "fc00::/7",           # unique-local
@@ -143,7 +144,7 @@ def _embedded_ipv4(
     if teredo:
         # (server, client) — the client address is the interesting half.
         return teredo[1]
-    if ip in ipaddress.ip_network("64:ff9b::/96"):
+    if ip in _NAT64_NETWORK:
         return ipaddress.ip_address(int(ip) & 0xFFFFFFFF)
     return None
 
@@ -158,10 +159,19 @@ def _is_metadata_endpoint(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> 
 def _is_private_or_reserved(
     ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
 ) -> bool:
-    candidates: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = [ip]
     inner = _embedded_ipv4(ip)
-    if inner is not None:
-        candidates.append(inner)
+    # NAT64 is a transport encoding whose standard outer prefix is classified
+    # reserved by the stdlib even when the embedded destination is public.
+    # Validate that actual IPv4 destination instead; metadata is checked above.
+    # Other transition formats retain both checks to avoid widening their
+    # established policy as a side effect of this NAT64 correction.
+    candidates: list[ipaddress.IPv4Address | ipaddress.IPv6Address]
+    if inner is not None and isinstance(ip, ipaddress.IPv6Address) and ip in _NAT64_NETWORK:
+        candidates = [inner]
+    else:
+        candidates = [ip]
+        if inner is not None:
+            candidates.append(inner)
     for candidate in candidates:
         if any(candidate in net for net in _BLOCKED_NETS):
             return True

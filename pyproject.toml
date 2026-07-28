@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mycelium-security"
-version = "0.1.1"
+version = "0.1.2"
 description = "SSRF mitigations for outbound HTTP in MCP servers and agentic runtimes"
 readme = "README.md"
 license = { text = "MIT" }

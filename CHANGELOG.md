@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.2 — 2026-07-28
+
+### Fixed
+
+- Standard-prefix NAT64 now validates the embedded IPv4 destination without
+  blanket-blocking the outer `64:ff9b::/96` representation.
+- Public NAT64 destinations such as the encoding of `8.8.8.8` remain reachable,
+  while private, CGNAT, and cloud-metadata destinations remain blocked.
+- The exported `__version__` now matches the package version.
+
 ## v0.1.1 — 2026-07-21
 
 **Security fix.** `assert_public_ip()` allowed carrier-grade NAT.

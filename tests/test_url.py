@@ -92,6 +92,22 @@ class TestAssertPublicIPMetadata:
                 allowlist_ranges=["169.254.0.0/16"],
             )
 
+    @pytest.mark.parametrize(
+        ("metadata_ip", "allowlist"),
+        [
+            ("::ffff:169.254.169.254", "::ffff:169.254.0.0/112"),
+            ("2002:a9fe:a9fe::", "2002::/16"),
+            ("64:ff9b::a9fe:a9fe", "64:ff9b::/96"),
+            ("2001:0000:4136:e378:8000:63bf:5601:5601", "2001::/32"),
+            ("fd00:ec2::254", "fc00::/7"),
+        ],
+    )
+    def test_cloud_metadata_representation_cannot_be_allowlisted(
+        self, metadata_ip, allowlist
+    ):
+        with pytest.raises(UnsafeURL, match="metadata"):
+            assert_public_ip(metadata_ip, allowlist_ranges=[allowlist])
+
 
 class TestAssertPublicIPPrivateRanges:
     @pytest.mark.parametrize(
@@ -207,6 +223,10 @@ class TestAssertPublicIPEmbeddedIPv4:
     def test_public_ipv4_mapped_still_allowed(self):
         """NEGATIVE CONTROL: a mapped PUBLIC address is not collateral damage."""
         assert_public_ip("::ffff:8.8.8.8")
+
+    def test_public_nat64_still_allowed(self):
+        """NEGATIVE CONTROL: standard NAT64 preserves a public inner address."""
+        assert_public_ip("64:ff9b::808:808")
 
 
 class TestAssertPublicIPSpecialPurposeTable:
