@@ -150,9 +150,15 @@ def _embedded_ipv4(
 
 
 def _is_metadata_endpoint(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    if str(ip) in _METADATA_IPS:
+    # IPv6 zone identifiers select an interface, not a different address.
+    # Strip them before policy comparison so ``fd00:ec2::254%eth0`` cannot
+    # evade the non-overridable metadata check and fall through an allowlist.
+    policy_ip: ipaddress.IPv4Address | ipaddress.IPv6Address = ip
+    if isinstance(ip, ipaddress.IPv6Address) and ip.scope_id is not None:
+        policy_ip = ipaddress.IPv6Address(ip.packed)
+    if str(policy_ip) in _METADATA_IPS:
         return True
-    inner = _embedded_ipv4(ip)
+    inner = _embedded_ipv4(policy_ip)
     return inner is not None and str(inner) in _METADATA_IPS
 
 

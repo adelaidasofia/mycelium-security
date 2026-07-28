@@ -100,6 +100,8 @@ class TestAssertPublicIPMetadata:
             ("64:ff9b::a9fe:a9fe", "64:ff9b::/96"),
             ("2001:0000:4136:e378:8000:63bf:5601:5601", "2001::/32"),
             ("fd00:ec2::254", "fc00::/7"),
+            ("fd00:ec2::254%lo0", "fc00::/7"),
+            ("fd00:ec2::254%25lo0", "fc00::/7"),
         ],
     )
     def test_cloud_metadata_representation_cannot_be_allowlisted(
