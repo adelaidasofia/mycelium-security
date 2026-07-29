@@ -9,17 +9,93 @@
 """
 from __future__ import annotations
 
+import ipaddress
+import json
 import socket
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from mycelium_security import url as url_module
 from mycelium_security import (
     UnsafeURL,
     assert_public_ip,
     resolve_pinned,
     sanitize_or_raise,
 )
+
+_SHARED_VECTOR_PATH = Path(__file__).with_name("ssrf_shared_vectors.json")
+
+
+def _shared_vectors() -> list[dict[str, object]]:
+    payload = json.loads(_SHARED_VECTOR_PATH.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 1
+    vectors = payload["vectors"]
+    assert isinstance(vectors, list)
+    return vectors
+
+
+@pytest.mark.parametrize("vector", _shared_vectors())
+def test_shared_ssrf_vector_contract(vector):
+    host = vector["host"]
+    allowlist_ranges = vector["allowlist_ranges"]
+    allowed = vector["allowed"]
+    assert isinstance(host, str)
+    assert isinstance(allowlist_ranges, list)
+    assert all(isinstance(cidr, str) for cidr in allowlist_ranges)
+    assert isinstance(allowed, bool)
+
+    try:
+        assert_public_ip(host, allowlist_ranges=allowlist_ranges)
+        actual_allowed = True
+    except UnsafeURL:
+        actual_allowed = False
+
+    assert actual_allowed is allowed
+
+
+def test_shared_contract_covers_every_metadata_representation_under_allowlist():
+    covered = {
+        (
+            vector["host"],
+            tuple(vector["allowlist_ranges"]),
+        )
+        for vector in _shared_vectors()
+        if vector["allowed"] is False
+    }
+    expected: set[tuple[str, tuple[str, ...]]] = set()
+
+    for literal in url_module._METADATA_IPS:
+        address = ipaddress.ip_address(literal)
+        if isinstance(address, ipaddress.IPv4Address):
+            value = int(address)
+            high = value >> 16
+            low = value & 0xFFFF
+            complemented = value ^ 0xFFFFFFFF
+            expected.update(
+                {
+                    (str(address), (f"{address}/32",)),
+                    (f"::ffff:{address}", ("::ffff:0:0/96",)),
+                    (f"2002:{high:04x}:{low:04x}::", ("2002::/16",)),
+                    (f"64:ff9b::{high:04x}:{low:04x}", ("64:ff9b::/96",)),
+                    (
+                        "2001:0000:4136:e378:8000:63bf:"
+                        f"{complemented >> 16:04x}:{complemented & 0xFFFF:04x}",
+                        ("2001::/32",),
+                    ),
+                }
+            )
+        else:
+            expected.update(
+                {
+                    (str(address), ("fc00::/7",)),
+                    (f"{address}%lo0", ("fc00::/7",)),
+                    (f"{address}%25lo0", ("fc00::/7",)),
+                }
+            )
+
+    assert expected <= covered
 
 
 class TestSanitizeOrRaise:
