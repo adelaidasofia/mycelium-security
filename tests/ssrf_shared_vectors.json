@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "vectors": [
+    {
+      "host": "100.64.0.1",
+      "allowlist_ranges": [],
+      "allowed": false
+    },
+    {
+      "host": "100.127.255.254",
+      "allowlist_ranges": [],
+      "allowed": false
+    },
+    {
+      "host": "::ffff:100.100.100.200",
+      "allowlist_ranges": [],
+      "allowed": false
+    },
+    {
+      "host": "::ffff:169.254.169.254",
+      "allowlist_ranges": [],
+      "allowed": false
+    },
+    {
+      "host": "169.254.169.254",
+      "allowlist_ranges": [
+        "169.254.169.254/32"
+      ],
+      "allowed": false
+    },
+    {
+      "host": "::ffff:169.254.169.254",
+      "allowlist_ranges": [
+        "::ffff:0:0/96"
+      ],
+      "allowed": false
+    },
+    {
+      "host": "2002:a9fe:a9fe::",
+      "allowlist_ranges": [
+        "2002::/16"
+      ],
+      "allowed": false
+    },
+    {
+      "host": "64:ff9b::a9fe:a9fe",
+      "allowlist_ranges": [
+        "64:ff9b::/96"
+      ],
+      "allowed": false
+    },
+    {
+      "host": "2001:0000:4136:e378:8000:63bf:5601:5601",
+      "allowlist_ranges": [
+        "2001::/32"
+      ],
+      "allowed": false
+    },
+    {
+      "host": "100.100.100.200",
+      "allowlist_ranges": [
+        "100.100.100.200/32"
+      ],
+      "allowed": false
+    },
+    {
+      "host": "::ffff:100.100.100.200",
+      "allowlist_ranges": [
+        "::ffff:0:0/96"
+      ],
+      "allowed": false
+    },
+    {
+      "host": "2002:6464:64c8::",
+      "allowlist_ranges": [
+        "2002::/16"
+      ],
+      "allowed": false
+    },
+    {
+      "host": "64:ff9b::6464:64c8",
+      "allowlist_ranges": [
+        "64:ff9b::/96"
+      ],
+      "allowed": false
+    },
+    {
+      "host": "2001:0000:4136:e378:8000:63bf:9b9b:9b37",
+      "allowlist_ranges": [
+        "2001::/32"
+      ],
+      "allowed": false
+    },
+    {
+      "host": "fd00:ec2::254",
+      "allowlist_ranges": [
+        "fc00::/7"
+      ],
+      "allowed": false
+    },
+    {
+      "host": "fd00:ec2::254%lo0",
+      "allowlist_ranges": [
+        "fc00::/7"
+      ],
+      "allowed": false
+    },
+    {
+      "host": "fd00:ec2::254%25lo0",
+      "allowlist_ranges": [
+        "fc00::/7"
+      ],
+      "allowed": false
+    },
+    {
+      "host": "64:ff9b::a00:1",
+      "allowlist_ranges": [],
+      "allowed": false
+    },
+    {
+      "host": "fc00::1",
+      "allowlist_ranges": [],
+      "allowed": false
+    },
+    {
+      "host": "8.8.8.8",
+      "allowlist_ranges": [],
+      "allowed": true
+    },
+    {
+      "host": "::ffff:8.8.8.8",
+      "allowlist_ranges": [],
+      "allowed": true
+    },
+    {
+      "host": "64:ff9b::808:808",
+      "allowlist_ranges": [],
+      "allowed": true
+    },
+    {
+      "host": "100.63.255.255",
+      "allowlist_ranges": [],
+      "allowed": true
+    },
+    {
+      "host": "100.128.0.0",
+      "allowlist_ranges": [],
+      "allowed": true
+    },
+    {
+      "host": "100.64.5.5",
+      "allowlist_ranges": [
+        "100.64.0.0/10"
+      ],
+      "allowed": true
+    }
+  ]
+}
