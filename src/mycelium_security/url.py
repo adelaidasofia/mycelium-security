@@ -11,21 +11,31 @@ Defends against:
   - IPv4 tunnelled inside IPv6 (IPv4-mapped / 6to4 / Teredo / NAT64) — the inner
     address is validated too, so ``::ffff:10.0.0.1`` cannot smuggle a private target
 
-Usage:
+Usage (recommended — single resolution, no rebinding window):
     from urllib.parse import urlparse
-    from mycelium_security import sanitize_or_raise, assert_public_ip, resolve_pinned
+    from mycelium_security import sanitize_or_raise, resolve_and_validate, resolve_pinned
 
     safe_url = sanitize_or_raise(user_supplied_url)
     host = urlparse(safe_url).hostname
+    validated = resolve_and_validate(host, allowlist_ranges=enterprise_onprem_cidrs)
+    pinned_ip = resolve_pinned(host, validated=validated)
+    # ...now safe to fetch with allow_redirects=False, using pinned_ip
+
+Deprecated pattern (two INDEPENDENT lookups — do not use for new code):
     assert_public_ip(host, allowlist_ranges=enterprise_onprem_cidrs)
     pinned_ip = resolve_pinned(host)
-    # ...now safe to fetch with allow_redirects=False, optionally using pinned_ip
+    # `resolve_pinned` still re-validates this single-arg call internally
+    # (MYC-4650), so it is safe, but it now does its OWN resolution rather
+    # than reusing `assert_public_ip`'s — prefer `resolve_and_validate` +
+    # `resolve_pinned(host, validated=...)` so only one DNS lookup happens
+    # for the whole validate-then-pin sequence.
 """
 from __future__ import annotations
 
 import ipaddress
 import socket
 from collections.abc import Iterable
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
 
@@ -46,6 +56,22 @@ _METADATA_IPS: frozenset[str] = frozenset(
 )
 
 _NAT64_NETWORK = ipaddress.ip_network("64:ff9b::/96")
+
+
+@dataclass(frozen=True)
+class ValidatedResolution:
+    """The result of resolving + validating a host, for reuse without a second lookup.
+
+    ``ips`` is the exact list ``assert_public_ip`` / ``resolve_and_validate``
+    already resolved and validated, in resolution order. Pass this object to
+    ``resolve_pinned(host, validated=...)`` so the pinned IP comes from THIS
+    list rather than a fresh, unvalidated DNS lookup (MYC-4650: reusing the
+    validated list is what closes the DNS-rebinding window between "validate"
+    and "pin").
+    """
+
+    host: str
+    ips: tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...]
 
 
 def sanitize_or_raise(url: str) -> str:
@@ -214,19 +240,20 @@ def _resolve_all(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Addres
     return out
 
 
-def assert_public_ip(
-    host: str, *, allowlist_ranges: Iterable[str] = ()
+def _validate_ips(
+    host: str,
+    ips: Iterable[ipaddress.IPv4Address | ipaddress.IPv6Address],
+    *,
+    allowlist_ranges: Iterable[str] = (),
 ) -> None:
-    """Resolve host to all IPs; raise UnsafeURL if any are blocked.
+    """Raise UnsafeURL if any IP in `ips` (already resolved from `host`) is blocked.
 
-    `allowlist_ranges`: optional Enterprise-tier on-prem CIDRs (e.g.
-    `["10.0.0.0/8", "192.168.1.0/24"]`) that override the standard
-    private-IP block. Allowlist NEVER bypasses cloud-metadata block.
+    Shared by `assert_public_ip` and `resolve_pinned`'s legacy one-arg path so
+    both validate the SAME list of IPs the same way — never two independent
+    resolutions validated by two independent code paths.
     """
-    if not host:
-        raise UnsafeURL("Cannot validate empty host")
     allowed_nets = [ipaddress.ip_network(cidr, strict=False) for cidr in allowlist_ranges]
-    for ip in _resolve_all(host):
+    for ip in ips:
         # Cloud-metadata is blocked regardless of any allowlist
         if _is_metadata_endpoint(ip):
             raise UnsafeURL(
@@ -241,12 +268,55 @@ def assert_public_ip(
             )
 
 
-def resolve_pinned(host: str) -> str:
-    """Resolve host once. Return the first IP as a string for pinned-IP fetches.
+def assert_public_ip(
+    host: str, *, allowlist_ranges: Iterable[str] = ()
+) -> ValidatedResolution:
+    """Resolve host to all IPs; raise UnsafeURL if any are blocked.
 
-    Used AFTER assert_public_ip succeeds. Pinning the IP prevents DNS-rebinding
-    attacks where the host's DNS re-resolves to a private IP between the
-    validation step and the actual fetch.
+    `allowlist_ranges`: optional Enterprise-tier on-prem CIDRs (e.g.
+    `["10.0.0.0/8", "192.168.1.0/24"]`) that override the standard
+    private-IP block. Allowlist NEVER bypasses cloud-metadata block.
+
+    Returns the `ValidatedResolution` (the exact resolved + validated IP
+    list) so a caller can hand it to `resolve_pinned(host, validated=...)`
+    without triggering a second, unvalidated DNS lookup. Existing callers
+    that only relied on the raise-on-failure behavior are unaffected.
     """
+    if not host:
+        raise UnsafeURL("Cannot validate empty host")
     ips = _resolve_all(host)
+    _validate_ips(host, ips, allowlist_ranges=allowlist_ranges)
+    return ValidatedResolution(host=host, ips=tuple(ips))
+
+
+def resolve_and_validate(
+    host: str, *, allowlist_ranges: Iterable[str] = ()
+) -> ValidatedResolution:
+    """Recommended single entry point: resolve `host` ONCE and validate it.
+
+    Equivalent to `assert_public_ip`, named for the call site that wants the
+    validated resolution to hand straight to `resolve_pinned(host, validated=...)`.
+    """
+    return assert_public_ip(host, allowlist_ranges=allowlist_ranges)
+
+
+def resolve_pinned(host: str, *, validated: ValidatedResolution | None = None) -> str:
+    """Return the first validated IP as a string, for pinned-IP fetches.
+
+    Pass `validated` (the `ValidatedResolution` returned by
+    `resolve_and_validate` / `assert_public_ip`) to pin from that SAME
+    resolution with NO new DNS lookup — the recommended path, since it
+    closes the DNS-rebinding window between "validate" and "pin" entirely.
+
+    Called with no `validated` (legacy one-arg form), this does its OWN
+    single resolution and runs the same validation `assert_public_ip` runs
+    on that list before returning — it never returns an unvalidated IP, but
+    it is a SECOND, independent lookup versus a prior `assert_public_ip`
+    call, so a rebinding resolver could answer differently between the two.
+    Prefer the `validated=` form for new code (MYC-4650).
+    """
+    if validated is not None:
+        return str(validated.ips[0])
+    ips = _resolve_all(host)
+    _validate_ips(host, ips, allowlist_ranges=())
     return str(ips[0])

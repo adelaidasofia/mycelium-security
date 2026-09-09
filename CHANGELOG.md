@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+**Security fix (MYC-4650).** `resolve_pinned(host)` re-resolved DNS instead
+of reusing the IPs `assert_public_ip(host)` already validated.
+
+### Fixed
+- **The documented two-call pattern (`assert_public_ip(host)` then
+  `resolve_pinned(host)`) performed TWO independent DNS resolutions.** A
+  DNS-rebinding attacker who answers public on the first lookup and
+  `169.254.169.254` (or any other blocked IP) on the second gets that
+  second answer handed straight back by `resolve_pinned`, unvalidated —
+  the exact rebinding window `resolve_pinned` exists to close.
+  `resolve_pinned(host)` called with no `validated=` argument still
+  re-validates its own (single) resolution before returning, so it never
+  hands back a blocked IP, but it is now documented as the legacy /
+  deprecated form because it remains a second, independent lookup.
+
+### Added
+- `assert_public_ip()` now returns a `ValidatedResolution` (the resolved +
+  validated IP list) instead of `None`. Existing callers that ignored the
+  return value are unaffected.
+- `resolve_and_validate(host, *, allowlist_ranges=())` — recommended single
+  entry point: one resolution, validated, returned as a `ValidatedResolution`.
+- `resolve_pinned(host, *, validated=None)` — pass the `ValidatedResolution`
+  from `resolve_and_validate`/`assert_public_ip` to pin the first IP from
+  that SAME list with **no new DNS lookup**. This is now the recommended
+  pattern; see README "Pinned-IP pattern."
+- `ValidatedResolution` — frozen dataclass (`host`, `ips`) exported from the
+  package.
+
+### Compatibility
+- No breaking API change. `assert_public_ip(host)` and `resolve_pinned(host)`
+  (legacy one-arg forms) both still work exactly as before for callers that
+  don't adopt `validated=`.
+
 ## v0.1.2 — 2026-07-28
 
 ### Fixed

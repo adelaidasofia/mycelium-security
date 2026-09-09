@@ -20,7 +20,9 @@ import pytest
 from mycelium_security import url as url_module
 from mycelium_security import (
     UnsafeURL,
+    ValidatedResolution,
     assert_public_ip,
+    resolve_and_validate,
     resolve_pinned,
     sanitize_or_raise,
 )
@@ -429,3 +431,53 @@ class TestResolvePinned:
                 (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("203.0.113.2", 0)),
             ]
             assert resolve_pinned("multi-record.example.com") == "203.0.113.1"
+
+    def test_validated_form_pins_without_a_second_lookup(self):
+        # MYC-4650 regression: a rebinding resolver answers PUBLIC on the
+        # first lookup (assert_public_ip) and the AWS metadata IP on a
+        # second, independent lookup. resolve_pinned(host, validated=...)
+        # must reuse the already-validated IP list and never call the
+        # resolver again — so the second (malicious) answer is never seen.
+        with patch("mycelium_security.url.socket.getaddrinfo") as mock_resolver:
+            mock_resolver.side_effect = [
+                [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0))],
+                [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("169.254.169.254", 0))],
+            ]
+            validated = assert_public_ip("rebind.example.com")
+            pinned = resolve_pinned("rebind.example.com", validated=validated)
+
+            assert pinned == "93.184.216.34"
+            assert mock_resolver.call_count == 1
+
+    def test_legacy_one_arg_call_still_validates_before_pinning(self):
+        # The legacy single-arg call (no `validated=`) must not become an
+        # unvalidated re-resolution: given a resolver that answers the
+        # metadata IP, it raises rather than pinning it.
+        with patch("mycelium_security.url.socket.getaddrinfo") as mock_resolver:
+            mock_resolver.return_value = [
+                (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("169.254.169.254", 0))
+            ]
+            with pytest.raises(UnsafeURL, match="metadata"):
+                resolve_pinned("legacy-metadata.example.com")
+
+
+class TestResolveAndValidate:
+    def test_returns_validated_resolution_with_one_lookup(self):
+        with patch("mycelium_security.url.socket.getaddrinfo") as mock_resolver:
+            mock_resolver.return_value = [
+                (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0)),
+            ]
+            result = resolve_and_validate("single-lookup.example.com")
+
+            assert isinstance(result, ValidatedResolution)
+            assert result.host == "single-lookup.example.com"
+            assert [str(ip) for ip in result.ips] == ["93.184.216.34"]
+            assert mock_resolver.call_count == 1
+
+    def test_raises_on_private_ip_and_never_returns_it(self):
+        with patch("mycelium_security.url.socket.getaddrinfo") as mock_resolver:
+            mock_resolver.return_value = [
+                (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.0.0.1", 0)),
+            ]
+            with pytest.raises(UnsafeURL):
+                resolve_and_validate("private.example.com")

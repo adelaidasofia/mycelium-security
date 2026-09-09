@@ -47,17 +47,28 @@ def safe_fetch(user_url: str) -> str:
     return resp.text
 ```
 
-### Three-call pattern (recommended for high-risk paths)
+### Pinned-IP pattern (recommended for high-risk paths)
 
 ```python
-from mycelium_security import sanitize_or_raise, assert_public_ip, resolve_pinned
+from mycelium_security import sanitize_or_raise, resolve_and_validate, resolve_pinned
 
 safe_url = sanitize_or_raise(user_url)
 host = urlparse(safe_url).hostname
-assert_public_ip(host)
-pinned_ip = resolve_pinned(host)   # pin the IP for the fetch lifetime
+validated = resolve_and_validate(host)          # ONE resolution, fully validated
+pinned_ip = resolve_pinned(host, validated=validated)  # pin from that SAME list
 # now use a custom transport that fetches `pinned_ip` with the original Host: header
 ```
+
+`resolve_and_validate` + `resolve_pinned(host, validated=...)` resolve the
+host exactly once. Passing `validated` is what makes `resolve_pinned` reuse
+that already-validated IP list instead of resolving again — the previous
+two-independent-lookups pattern (`assert_public_ip(host)` then
+`resolve_pinned(host)`, each resolving DNS on its own) is **deprecated**:
+each call was a separate DNS round trip, so a rebinding resolver could
+legitimately answer differently between them. `resolve_pinned(host)` called
+without `validated` still re-validates internally and will never hand back
+a private or metadata IP, but it now does that via its own extra lookup —
+prefer the pinned-IP pattern above for new code.
 
 ### Enterprise on-prem allowlist
 
@@ -82,8 +93,10 @@ assert_public_ip(
 | Function | Purpose |
 |---|---|
 | `sanitize_or_raise(url: str) -> str` | Validate URL string; reject dangerous chars + schemes + embedded creds. Raises `UnsafeURL`. |
-| `assert_public_ip(host: str, *, allowlist_ranges: Iterable[str] = ()) -> None` | Resolve host, raise `UnsafeURL` if any resolved IP is private / metadata / link-local / unspecified. |
-| `resolve_pinned(host: str) -> str` | Resolve once, return the first IP as a string. Pair with `assert_public_ip` for DNS-rebinding mitigation. |
+| `resolve_and_validate(host: str, *, allowlist_ranges: Iterable[str] = ()) -> ValidatedResolution` | **Recommended entry point.** Resolve host ONCE, raise `UnsafeURL` if any resolved IP is private / metadata / link-local / unspecified, return the validated resolution. |
+| `assert_public_ip(host: str, *, allowlist_ranges: Iterable[str] = ()) -> ValidatedResolution` | Same behavior as `resolve_and_validate` (kept as the original name). Existing callers that ignore the return value are unaffected. |
+| `resolve_pinned(host: str, *, validated: ValidatedResolution \| None = None) -> str` | With `validated=`, returns its first IP with **no new lookup** — pass the result of `resolve_and_validate`/`assert_public_ip`. Without it (deprecated legacy form), does its own single resolution and validates it before returning. |
+| `ValidatedResolution` | Frozen result of a validated resolution: `host: str`, `ips: tuple[ipaddress.IPv4Address \| ipaddress.IPv6Address, ...]`. |
 | `UnsafeURL` | `ValueError` subclass raised on any check failure. |
 
 ## Tests
