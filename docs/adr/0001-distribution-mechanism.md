@@ -43,7 +43,7 @@ After PyPI publish, MCPs can flip to `mycelium-security>=0.1.0,<0.2`.
 - PyPI listing surfaces the helper to the wider community (open-core boundary respected: helper is generic security code, no personal data, no business logic).
 
 **Negative.**
-- Git-URL deps don't get dependabot security alerts the way named PyPI deps do. Migration to named PyPI dep is queued as a follow-up once trusted publisher is configured (~5 min one-time Adelaida action on pypi.org).
+- Git-URL deps don't get dependabot security alerts the way named PyPI deps do. Migration to named PyPI dep is queued as a follow-up once trusted publisher is configured (~5 min one-time operator action on pypi.org).
 - Adding any dep is a supply-chain surface. Mitigation: the helper has zero runtime deps (stdlib only — `ipaddress`, `socket`, `urllib.parse`); the only dev dep is `pytest`.
 
 **Trade-off declined.**
