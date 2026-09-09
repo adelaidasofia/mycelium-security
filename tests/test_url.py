@@ -427,10 +427,13 @@ class TestResolvePinned:
     def test_uses_first_resolved_ip(self):
         with patch("mycelium_security.url.socket.getaddrinfo") as mock_resolver:
             mock_resolver.return_value = [
-                (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("203.0.113.1", 0)),
-                (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("203.0.113.2", 0)),
+                # Public addresses: the legacy one-arg path now VALIDATES its
+                # single resolution (MYC-4650), so a TEST-NET / documentation
+                # range here would (correctly) raise instead of being pinned.
+                (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0)),
+                (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.35", 0)),
             ]
-            assert resolve_pinned("multi-record.example.com") == "203.0.113.1"
+            assert resolve_pinned("multi-record.example.com") == "93.184.216.34"
 
     def test_validated_form_pins_without_a_second_lookup(self):
         # MYC-4650 regression: a rebinding resolver answers PUBLIC on the
