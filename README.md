@@ -70,6 +70,22 @@ without `validated` still re-validates internally and will never hand back
 a private or metadata IP, but it now does that via its own extra lookup —
 prefer the pinned-IP pattern above for new code.
 
+**If you use the deprecated pattern with an Enterprise on-prem allowlist,
+pass `allowlist_ranges` to BOTH calls:**
+
+```python
+assert_public_ip(host, allowlist_ranges=["10.20.0.0/16"])
+pinned_ip = resolve_pinned(host, allowlist_ranges=["10.20.0.0/16"])  # required
+```
+
+`resolve_pinned(host)`'s legacy one-arg form re-resolves and re-validates
+independently, with an EMPTY allowlist by default — omit `allowlist_ranges`
+here and a host that only resolves inside `10.20.0.0/16` raises `UnsafeURL`
+on this second call even though `assert_public_ip` just accepted it
+(MYC-4650 review round 2). `resolve_pinned(host, validated=...)` does not
+have this trap: the allowlist was already applied when `validated` was
+built.
+
 ### Enterprise on-prem allowlist
 
 ```python

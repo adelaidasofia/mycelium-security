@@ -23,19 +23,26 @@ Usage (recommended — single resolution, no rebinding window):
 
 Deprecated pattern (two INDEPENDENT lookups — do not use for new code):
     assert_public_ip(host, allowlist_ranges=enterprise_onprem_cidrs)
-    pinned_ip = resolve_pinned(host)
+    pinned_ip = resolve_pinned(host, allowlist_ranges=enterprise_onprem_cidrs)
     # `resolve_pinned` still re-validates this single-arg call internally
     # (MYC-4650), so it is safe, but it now does its OWN resolution rather
     # than reusing `assert_public_ip`'s — prefer `resolve_and_validate` +
     # `resolve_pinned(host, validated=...)` so only one DNS lookup happens
     # for the whole validate-then-pin sequence.
+    #
+    # `allowlist_ranges` must be passed to BOTH calls here (MYC-4650 review
+    # round 2): `resolve_pinned`'s legacy one-arg form re-resolves and
+    # re-validates on its own, with an EMPTY allowlist by default, so a host
+    # that only resolves inside `enterprise_onprem_cidrs` raises `UnsafeURL`
+    # if this second call omits it — even though `assert_public_ip` on the
+    # line above already accepted that exact host.
 """
 from __future__ import annotations
 
 import ipaddress
 import socket
 from collections.abc import Iterable
-from dataclasses import dataclass
+from typing import NamedTuple
 from urllib.parse import urlparse
 
 
@@ -58,8 +65,7 @@ _METADATA_IPS: frozenset[str] = frozenset(
 _NAT64_NETWORK = ipaddress.ip_network("64:ff9b::/96")
 
 
-@dataclass(frozen=True)
-class ValidatedResolution:
+class ValidatedResolution(NamedTuple):
     """The result of resolving + validating a host, for reuse without a second lookup.
 
     ``ips`` is the exact list ``assert_public_ip`` / ``resolve_and_validate``
@@ -68,6 +74,16 @@ class ValidatedResolution:
     list rather than a fresh, unvalidated DNS lookup (MYC-4650: reusing the
     validated list is what closes the DNS-rebinding window between "validate"
     and "pin").
+
+    A ``NamedTuple``, not a ``@dataclass`` (MYC-4650 review round 2, F1): a
+    consumer (memory-runtime-pro's ``security-audit`` gate) loads this file
+    standalone via ``importlib.util.spec_from_file_location`` +
+    ``exec_module``, which never registers the module in ``sys.modules``.
+    With ``from __future__ import annotations`` active, ``@dataclass`` calls
+    ``dataclasses._is_type``, which does ``sys.modules.get(cls.__module__)``
+    and then dereferences its ``.__dict__`` — ``None.__dict__`` raises
+    ``AttributeError`` on every standalone load. ``NamedTuple`` has no such
+    dependency on module registration, so it loads standalone on 3.9-3.14.
     """
 
     host: str
@@ -300,13 +316,20 @@ def resolve_and_validate(
     return assert_public_ip(host, allowlist_ranges=allowlist_ranges)
 
 
-def resolve_pinned(host: str, *, validated: ValidatedResolution | None = None) -> str:
+def resolve_pinned(
+    host: str,
+    *,
+    validated: ValidatedResolution | None = None,
+    allowlist_ranges: Iterable[str] = (),
+) -> str:
     """Return the first validated IP as a string, for pinned-IP fetches.
 
     Pass `validated` (the `ValidatedResolution` returned by
     `resolve_and_validate` / `assert_public_ip`) to pin from that SAME
     resolution with NO new DNS lookup — the recommended path, since it
     closes the DNS-rebinding window between "validate" and "pin" entirely.
+    `validated.host` must match `host`, or this raises `UnsafeURL` — a
+    mismatch means the caller is pinning the wrong host's resolution.
 
     Called with no `validated` (legacy one-arg form), this does its OWN
     single resolution and runs the same validation `assert_public_ip` runs
@@ -314,9 +337,35 @@ def resolve_pinned(host: str, *, validated: ValidatedResolution | None = None) -
     it is a SECOND, independent lookup versus a prior `assert_public_ip`
     call, so a rebinding resolver could answer differently between the two.
     Prefer the `validated=` form for new code (MYC-4650).
+
+    `allowlist_ranges`: forwarded to whichever validation runs — the legacy
+    path's fresh resolution, or the re-validation of a reused `validated`
+    list (see below). Pass the SAME ranges used to build `validated` so the
+    re-check agrees with the original decision. Without this parameter, an
+    Enterprise on-prem caller who validated `host` with
+    `allowlist_ranges=[...]` and then pinned via the legacy one-arg form
+    would get `UnsafeURL` on their own allowlisted private IP, because the
+    legacy path used to re-resolve with an empty allowlist regardless of
+    what the caller had validated with (MYC-4650 review round 2, F2).
     """
     if validated is not None:
+        if not isinstance(validated, ValidatedResolution):
+            raise UnsafeURL(
+                f"validated must be a ValidatedResolution, got {type(validated)!r}"
+            )
+        if validated.host != host:
+            raise UnsafeURL(
+                f"validated resolution is for {validated.host!r}, not {host!r}"
+            )
+        if not validated.ips:
+            raise UnsafeURL(f"validated resolution for {host!r} has no IPs")
+        # Re-validate the reused list (pure, no DNS) rather than trusting it
+        # unconditionally — a hand-built or duck-typed `ValidatedResolution`
+        # may not have been through `_validate_ips` at all (MYC-4650 review
+        # round 2, F4/F5), so the returned IP must be validated by
+        # construction, not merely by the caller's earlier good behavior.
+        _validate_ips(host, validated.ips, allowlist_ranges=allowlist_ranges)
         return str(validated.ips[0])
     ips = _resolve_all(host)
-    _validate_ips(host, ips, allowlist_ranges=())
+    _validate_ips(host, ips, allowlist_ranges=allowlist_ranges)
     return str(ips[0])

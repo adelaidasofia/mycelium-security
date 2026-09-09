@@ -484,3 +484,133 @@ class TestResolveAndValidate:
             ]
             with pytest.raises(UnsafeURL):
                 resolve_and_validate("private.example.com")
+
+    @pytest.mark.parametrize(
+        ("host", "ip", "raises"),
+        [
+            ("resolve-and-validate-alias-public.example.com", "93.184.216.34", False),
+            ("resolve-and-validate-alias-metadata.example.com", "169.254.169.254", True),
+        ],
+    )
+    def test_resolve_and_validate_is_an_alias_of_assert_public_ip(self, host, ip, raises):
+        # MYC-4650 review round 2, F6: `resolve_and_validate` is a bare alias
+        # of `assert_public_ip` — both names must return equal
+        # ValidatedResolution objects on success, and raise the same way on
+        # a blocked IP.
+        with patch("mycelium_security.url.socket.getaddrinfo") as mock_resolver:
+            mock_resolver.return_value = [
+                (socket.AF_INET, socket.SOCK_STREAM, 0, "", (ip, 0)),
+            ]
+            if raises:
+                with pytest.raises(UnsafeURL) as exc_direct:
+                    assert_public_ip(host)
+            else:
+                direct = assert_public_ip(host)
+
+        with patch("mycelium_security.url.socket.getaddrinfo") as mock_resolver:
+            mock_resolver.return_value = [
+                (socket.AF_INET, socket.SOCK_STREAM, 0, "", (ip, 0)),
+            ]
+            if raises:
+                with pytest.raises(UnsafeURL) as exc_alias:
+                    resolve_and_validate(host)
+                assert str(exc_direct.value) == str(exc_alias.value)
+            else:
+                alias = resolve_and_validate(host)
+                assert isinstance(alias, ValidatedResolution)
+                assert alias == direct
+
+
+class TestResolvePinnedAllowlist:
+    # MYC-4650 review round 2, F2: the legacy one-arg `resolve_pinned(host)`
+    # form hardcoded `allowlist_ranges=()` on its internal re-resolution, so
+    # an Enterprise on-prem caller who validated with `allowlist_ranges=[...]`
+    # got `UnsafeURL` on their own allowlisted private IP when pinning via
+    # the legacy form.
+    def test_legacy_form_honours_allowlist(self):
+        with patch("mycelium_security.url.socket.getaddrinfo") as mock_resolver:
+            mock_resolver.return_value = [
+                (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.42.0.7", 0)),
+            ]
+            pinned = resolve_pinned(
+                "onprem-allowlisted.example.com", allowlist_ranges=["10.0.0.0/8"]
+            )
+            assert pinned == "10.42.0.7"
+
+    def test_legacy_form_without_allowlist_still_blocks_private(self):
+        with patch("mycelium_security.url.socket.getaddrinfo") as mock_resolver:
+            mock_resolver.return_value = [
+                (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.42.0.7", 0)),
+            ]
+            with pytest.raises(UnsafeURL):
+                resolve_pinned("onprem-no-allowlist.example.com")
+
+
+class TestResolvePinnedValidatedHostMismatch:
+    # MYC-4650 review round 2, F3: resolve_pinned(host, validated=v) never
+    # compared v.host to host, so a validated resolution for one host could
+    # silently pin a different host's fetch to it.
+    def test_mismatch_raises(self):
+        validated = ValidatedResolution(
+            host="a-host.example.com", ips=(ipaddress.ip_address("93.184.216.34"),)
+        )
+        with pytest.raises(UnsafeURL, match=r"not 'b-host\.example\.com'"):
+            resolve_pinned("b-host.example.com", validated=validated)
+
+    def test_empty_validated_host_mismatches_a_real_host(self):
+        validated = ValidatedResolution(
+            host="", ips=(ipaddress.ip_address("93.184.216.34"),)
+        )
+        with pytest.raises(UnsafeURL):
+            resolve_pinned("real-host.example.com", validated=validated)
+
+
+class TestResolvePinnedValidatedIntegrity:
+    # MYC-4650 review round 2, F4 + F5: ValidatedResolution was a plain
+    # record trusted unconditionally. A hand-built one carrying a metadata
+    # IP was returned verbatim, a duck-typed object with `.ips` worked, a
+    # wrong type raised AttributeError, and empty `ips` raised IndexError —
+    # all outside the documented UnsafeURL contract callers catch.
+    def test_hand_built_metadata_ip_raises(self):
+        validated = ValidatedResolution(
+            host="hand-built-metadata.example.com",
+            ips=(ipaddress.ip_address("169.254.169.254"),),
+        )
+        with pytest.raises(UnsafeURL, match="metadata"):
+            resolve_pinned("hand-built-metadata.example.com", validated=validated)
+
+    def test_duck_typed_object_raises_unsafe_url(self):
+        class _FakeValidated:
+            host = "duck-typed.example.com"
+            ips = (ipaddress.ip_address("93.184.216.34"),)
+
+        with pytest.raises(UnsafeURL, match="ValidatedResolution"):
+            resolve_pinned("duck-typed.example.com", validated=_FakeValidated())
+
+    def test_wrong_type_raises_unsafe_url(self):
+        with pytest.raises(UnsafeURL, match="ValidatedResolution"):
+            resolve_pinned(
+                "wrong-type.example.com", validated="not-a-validated-resolution"
+            )
+
+    def test_empty_ips_raises_unsafe_url(self):
+        validated = ValidatedResolution(host="empty-ips.example.com", ips=())
+        with pytest.raises(UnsafeURL):
+            resolve_pinned("empty-ips.example.com", validated=validated)
+
+    def test_reused_list_is_revalidated_with_no_extra_resolver_call(self):
+        # The rebinding-stub shape from test_validated_form_pins_without_a_
+        # second_lookup, but proving the REUSED list is actively
+        # re-validated (not merely trusted) while still costing exactly one
+        # resolver call.
+        with patch("mycelium_security.url.socket.getaddrinfo") as mock_resolver:
+            mock_resolver.return_value = [
+                (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0)),
+            ]
+            validated = assert_public_ip("revalidated-reuse.example.com")
+            pinned = resolve_pinned(
+                "revalidated-reuse.example.com", validated=validated
+            )
+
+            assert pinned == "93.184.216.34"
+            assert mock_resolver.call_count == 1

@@ -23,17 +23,53 @@ of reusing the IPs `assert_public_ip(host)` already validated.
   return value are unaffected.
 - `resolve_and_validate(host, *, allowlist_ranges=())` — recommended single
   entry point: one resolution, validated, returned as a `ValidatedResolution`.
-- `resolve_pinned(host, *, validated=None)` — pass the `ValidatedResolution`
-  from `resolve_and_validate`/`assert_public_ip` to pin the first IP from
-  that SAME list with **no new DNS lookup**. This is now the recommended
-  pattern; see README "Pinned-IP pattern."
-- `ValidatedResolution` — frozen dataclass (`host`, `ips`) exported from the
-  package.
+- `resolve_pinned(host, *, validated=None, allowlist_ranges=())` — pass the
+  `ValidatedResolution` from `resolve_and_validate`/`assert_public_ip` to pin
+  the first IP from that SAME list with **no new DNS lookup**. This is now
+  the recommended pattern; see README "Pinned-IP pattern."
+- `ValidatedResolution` — `NamedTuple` (`host`, `ips`) exported from the
+  package. (Shipped as a frozen `dataclass` first; changed to `NamedTuple`
+  in review round 2 — see Fixed below.)
+
+### Fixed (review round 2)
+- **`ValidatedResolution` as a `@dataclass` crashed any standalone load of
+  this module.** A consumer that loads `url.py` via
+  `importlib.util.spec_from_file_location` + `exec_module` (as
+  memory-runtime-pro's `security-audit` gate does) never registers the
+  module in `sys.modules`; with `from __future__ import annotations` active,
+  `@dataclass` dereferences `sys.modules[cls.__module__].__dict__` and
+  raises `AttributeError` on `None`. Changed to `NamedTuple`, which has no
+  such dependency and loads standalone on 3.9–3.14. `host`/`ips` field
+  access and equality are unchanged.
+- **`resolve_pinned(host)` (legacy one-arg form) ignored any enterprise
+  on-prem allowlist.** It hardcoded `allowlist_ranges=()` on its internal
+  re-resolution, so a caller who validated a host with
+  `allowlist_ranges=["10.0.0.0/8"]` and then pinned via the one-arg form got
+  `UnsafeURL` on their own allowlisted private IP. `resolve_pinned` now
+  takes `allowlist_ranges` and forwards it — **pass the same ranges you
+  validated with, or the legacy form will (correctly) reject an allowlisted
+  private IP.**
+- **`resolve_pinned(host, validated=v)` never checked `v.host` against
+  `host`.** Passing a `ValidatedResolution` for a different host silently
+  pinned to the wrong host's IP. Mismatch now raises `UnsafeURL`.
+- **A malformed `ValidatedResolution` (hand-built, duck-typed, wrong type,
+  or empty `ips`) bypassed validation entirely or raised the wrong
+  exception type.** `resolve_pinned` now rejects anything that isn't a real
+  `ValidatedResolution`, rejects one with no `ips`, and — because neither of
+  those guarantees the reused list was ever actually checked — re-runs the
+  same allowlist/private/metadata validation on it (no DNS involved) before
+  returning. All three failure modes now raise `UnsafeURL`, never
+  `AttributeError` or `IndexError`.
 
 ### Compatibility
-- No breaking API change. `assert_public_ip(host)` and `resolve_pinned(host)`
-  (legacy one-arg forms) both still work exactly as before for callers that
-  don't adopt `validated=`.
+- **Not** a fully additive change versus the first cut of this fix: an
+  Enterprise on-prem caller using the legacy one-arg `resolve_pinned(host)`
+  form with an allowlisted private host now needs to pass
+  `allowlist_ranges=[...]` explicitly (see Fixed above) — omitting it now
+  correctly rejects the private IP instead of silently working by accident.
+  Callers on public hosts, or already using `resolve_pinned(host,
+  validated=...)` with a valid, matching `ValidatedResolution`, are
+  unaffected. `assert_public_ip(host)` is unchanged.
 
 ## v0.1.2 — 2026-07-28
 
