@@ -19,6 +19,11 @@ Usage (recommended — single resolution, no rebinding window):
     host = urlparse(safe_url).hostname
     validated = resolve_and_validate(host, allowlist_ranges=enterprise_onprem_cidrs)
     pinned_ip = resolve_pinned(host, validated=validated)
+    # `validated` carries `enterprise_onprem_cidrs` inside it (MYC-4650
+    # review round 3, F7), so `resolve_pinned` re-validates against that
+    # SAME allowlist even though this call passes no `allowlist_ranges` of
+    # its own — this recommended snippet now round-trips correctly for an
+    # Enterprise on-prem allowlisted host.
     # ...now safe to fetch with allow_redirects=False, using pinned_ip
 
 Deprecated pattern (two INDEPENDENT lookups — do not use for new code):
@@ -83,11 +88,28 @@ class ValidatedResolution(NamedTuple):
     ``dataclasses._is_type``, which does ``sys.modules.get(cls.__module__)``
     and then dereferences its ``.__dict__`` — ``None.__dict__`` raises
     ``AttributeError`` on every standalone load. ``NamedTuple`` has no such
-    dependency on module registration, so it loads standalone on 3.9-3.14.
+    dependency on module registration, so it loads standalone on 3.10+
+    (the package floor; measured on 3.12 and 3.14).
+
+    ``allowlist_ranges`` is the (normalised to ``tuple[str, ...]``) set of
+    on-prem CIDRs ``assert_public_ip`` / ``resolve_and_validate`` validated
+    this resolution against (MYC-4650 review round 3, F7). Carrying it here
+    is what lets ``resolve_pinned(host, validated=...)`` re-validate the
+    reused list against the SAME allowlist the caller originally used,
+    without repeating ``allowlist_ranges`` at the pin call site.
+
+    Residual risk: this is a plain, unchecked ``NamedTuple`` — nothing
+    stops a caller from hand-building one that NAMES a private range in
+    its own ``allowlist_ranges`` and self-authorising it for whatever
+    `resolve_pinned` re-validation runs next. Only trust an
+    ``allowlist_ranges`` value on a record this package itself produced.
+    Cloud-metadata IPs remain blocked unconditionally by ``_validate_ips``
+    regardless of any allowlist, hand-built or not.
     """
 
     host: str
     ips: tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...]
+    allowlist_ranges: tuple[str, ...] = ()
 
 
 def sanitize_or_raise(url: str) -> str:
@@ -297,12 +319,20 @@ def assert_public_ip(
     list) so a caller can hand it to `resolve_pinned(host, validated=...)`
     without triggering a second, unvalidated DNS lookup. Existing callers
     that only relied on the raise-on-failure behavior are unaffected.
+
+    The returned `ValidatedResolution.allowlist_ranges` carries this call's
+    `allowlist_ranges`, normalised to `tuple[str, ...]` (MYC-4650 review
+    round 3, F7), so `resolve_pinned(host, validated=...)` can re-validate
+    against the SAME allowlist without the caller repeating it.
     """
     if not host:
         raise UnsafeURL("Cannot validate empty host")
+    normalized_allowlist = tuple(str(cidr) for cidr in allowlist_ranges)
     ips = _resolve_all(host)
-    _validate_ips(host, ips, allowlist_ranges=allowlist_ranges)
-    return ValidatedResolution(host=host, ips=tuple(ips))
+    _validate_ips(host, ips, allowlist_ranges=normalized_allowlist)
+    return ValidatedResolution(
+        host=host, ips=tuple(ips), allowlist_ranges=normalized_allowlist
+    )
 
 
 def resolve_and_validate(
@@ -347,7 +377,25 @@ def resolve_pinned(
     would get `UnsafeURL` on their own allowlisted private IP, because the
     legacy path used to re-resolve with an empty allowlist regardless of
     what the caller had validated with (MYC-4650 review round 2, F2).
+
+    When `validated` is passed and `allowlist_ranges` is NOT (the empty
+    default), the re-validation uses `validated.allowlist_ranges` instead
+    — the ranges `assert_public_ip`/`resolve_and_validate` recorded when
+    they built `validated` — so the README-recommended `resolve_and_validate`
+    + `resolve_pinned(host, validated=...)` pattern round-trips an
+    Enterprise on-prem allowlist with no repeated argument (MYC-4650 review
+    round 3, F7). Passing `allowlist_ranges` explicitly here still wins over
+    whatever `validated` carries, for a caller that wants to widen or
+    narrow the check at the pin site.
+
+    Residual risk of trusting `validated.allowlist_ranges`: a hand-built
+    `ValidatedResolution` can name a private range in its own
+    `allowlist_ranges` and self-authorise it here. Cloud-metadata IPs stay
+    blocked regardless — `_validate_ips` never lets any allowlist override
+    that check.
     """
+    if not host:
+        raise UnsafeURL("Cannot validate empty host")
     if validated is not None:
         if not isinstance(validated, ValidatedResolution):
             raise UnsafeURL(
@@ -359,12 +407,22 @@ def resolve_pinned(
             )
         if not validated.ips:
             raise UnsafeURL(f"validated resolution for {host!r} has no IPs")
+        if not all(
+            isinstance(ip, (ipaddress.IPv4Address, ipaddress.IPv6Address))
+            for ip in validated.ips
+        ):
+            raise UnsafeURL(
+                f"validated resolution for {host!r} contains a non-IP-address element"
+            )
         # Re-validate the reused list (pure, no DNS) rather than trusting it
         # unconditionally — a hand-built or duck-typed `ValidatedResolution`
         # may not have been through `_validate_ips` at all (MYC-4650 review
         # round 2, F4/F5), so the returned IP must be validated by
         # construction, not merely by the caller's earlier good behavior.
-        _validate_ips(host, validated.ips, allowlist_ranges=allowlist_ranges)
+        # An explicitly-passed `allowlist_ranges` wins; otherwise reuse the
+        # allowlist `validated` itself was built with (round 3, F7).
+        effective_allowlist = tuple(allowlist_ranges) or validated.allowlist_ranges
+        _validate_ips(host, validated.ips, allowlist_ranges=effective_allowlist)
         return str(validated.ips[0])
     ips = _resolve_all(host)
     _validate_ips(host, ips, allowlist_ranges=allowlist_ranges)

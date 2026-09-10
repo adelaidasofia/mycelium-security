@@ -39,8 +39,9 @@ of reusing the IPs `assert_public_ip(host)` already validated.
   module in `sys.modules`; with `from __future__ import annotations` active,
   `@dataclass` dereferences `sys.modules[cls.__module__].__dict__` and
   raises `AttributeError` on `None`. Changed to `NamedTuple`, which has no
-  such dependency and loads standalone on 3.9–3.14. `host`/`ips` field
-  access and equality are unchanged.
+  such dependency and loads standalone on 3.10+ (the package floor;
+  measured on 3.12 and 3.14). `host`/`ips` field access and equality are
+  unchanged.
 - **`resolve_pinned(host)` (legacy one-arg form) ignored any enterprise
   on-prem allowlist.** It hardcoded `allowlist_ranges=()` on its internal
   re-resolution, so a caller who validated a host with
@@ -61,15 +62,58 @@ of reusing the IPs `assert_public_ip(host)` already validated.
   returning. All three failure modes now raise `UnsafeURL`, never
   `AttributeError` or `IndexError`.
 
-### Compatibility
+### Compatibility (review round 2, corrected in round 3 below)
 - **Not** a fully additive change versus the first cut of this fix: an
   Enterprise on-prem caller using the legacy one-arg `resolve_pinned(host)`
   form with an allowlisted private host now needs to pass
   `allowlist_ranges=[...]` explicitly (see Fixed above) — omitting it now
   correctly rejects the private IP instead of silently working by accident.
-  Callers on public hosts, or already using `resolve_pinned(host,
-  validated=...)` with a valid, matching `ValidatedResolution`, are
-  unaffected. `assert_public_ip(host)` is unchanged.
+  `assert_public_ip(host)` is unchanged.
+- **This paragraph originally also claimed** that a caller "already using
+  `resolve_pinned(host, validated=...)` with a valid, matching
+  `ValidatedResolution`" was unaffected. **That was false as shipped in
+  round 2** (F7 below): `validated` did not carry the allowlist it was
+  built with, so `resolve_pinned(host, validated=validated)` re-validated
+  with an EMPTY allowlist by default and raised `UnsafeURL` on an
+  Enterprise on-prem caller's own allowlisted private IP — exactly the
+  README-recommended pattern (`resolve_and_validate(host,
+  allowlist_ranges=[...])` then `resolve_pinned(host, validated=validated)`)
+  regressed. Fixed in round 3; see below for the corrected behavior.
+
+### Fixed (review round 3)
+- **F7 (HIGH, regression).** `ValidatedResolution` now carries
+  `allowlist_ranges: tuple[str, ...] = ()`, populated by `assert_public_ip`
+  / `resolve_and_validate` from the ranges they validated with. On top of
+  that, `resolve_pinned(host, validated=validated)` re-validates against the
+  explicitly-passed `allowlist_ranges` if non-empty, else falls back to
+  `validated.allowlist_ranges` — so the README-recommended pinned-IP
+  pattern round-trips an Enterprise on-prem allowlist correctly again.
+  Residual risk: a hand-built `ValidatedResolution` can self-authorise a
+  private range it names in its own `allowlist_ranges`; cloud-metadata
+  stays unconditionally blocked regardless.
+- **F9.** A `ValidatedResolution` whose `ips` contained a non-IP-address
+  element (a `str`, `None`, ...) reached `_is_private_or_reserved` and
+  raised `AttributeError` instead of `UnsafeURL`. `resolve_pinned` now
+  checks every element's type before re-validating.
+- **F10.** `resolve_pinned("", validated=<record with host "">)` returned
+  an IP even though `assert_public_ip("")` refuses empty hosts. The
+  empty-host check is now hoisted to the top of `resolve_pinned`, ahead of
+  the `validated` branch.
+- **F11.** The existing
+  `test_reused_list_is_revalidated_with_no_extra_resolver_call` test used a
+  public IP, so it passed even with `resolve_pinned`'s re-validation of the
+  reused list deleted — it proved only the one-resolver-call behavior, not
+  the re-validation. Split into
+  `test_reused_list_costs_exactly_one_resolver_call` (that claim only) and
+  `test_reused_private_ip_with_no_allowlist_is_rejected` (a private IP with
+  no allowlist, which dies without re-validation).
+- **F12.** `url.py`'s `ValidatedResolution` docstring claimed it "loads
+  standalone on 3.9-3.14"; the package floor is 3.10 and only 3.12/3.14
+  were ever measured. Reworded to "3.10+ (measured on 3.12 and 3.14)"
+  everywhere that claim appeared (this file included).
+- **F8.** README's API table listed `resolve_pinned`'s signature without
+  `allowlist_ranges` and called `ValidatedResolution` a "Frozen result" —
+  corrected to show the third field and say `NamedTuple`.
 
 ## v0.1.2 — 2026-07-28
 

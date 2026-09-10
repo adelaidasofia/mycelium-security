@@ -598,11 +598,13 @@ class TestResolvePinnedValidatedIntegrity:
         with pytest.raises(UnsafeURL):
             resolve_pinned("empty-ips.example.com", validated=validated)
 
-    def test_reused_list_is_revalidated_with_no_extra_resolver_call(self):
+    def test_reused_list_costs_exactly_one_resolver_call(self):
         # The rebinding-stub shape from test_validated_form_pins_without_a_
-        # second_lookup, but proving the REUSED list is actively
-        # re-validated (not merely trusted) while still costing exactly one
-        # resolver call.
+        # second_lookup: proves the validate-then-pin sequence costs exactly
+        # one resolver call. On its own this passes even with re-validation
+        # deleted (it uses a public IP) — see
+        # test_reused_private_ip_with_no_allowlist_is_rejected below (F11)
+        # for the test that actually goes RED without re-validation.
         with patch("mycelium_security.url.socket.getaddrinfo") as mock_resolver:
             mock_resolver.return_value = [
                 (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0)),
@@ -614,3 +616,128 @@ class TestResolvePinnedValidatedIntegrity:
 
             assert pinned == "93.184.216.34"
             assert mock_resolver.call_count == 1
+
+    def test_reused_private_ip_with_no_allowlist_is_rejected(self):
+        # F11 (MYC-4650 review round 3): a hand-built ValidatedResolution
+        # naming a PRIVATE IP with no allowlist must be rejected by
+        # resolve_pinned's re-validation. Unlike the public-IP test above,
+        # this one dies if the `_validate_ips(host, validated.ips, ...)`
+        # re-run inside resolve_pinned is ever deleted.
+        validated = ValidatedResolution(
+            host="reused-private-no-allowlist.example.com",
+            ips=(ipaddress.ip_address("10.0.0.1"),),
+        )
+        with pytest.raises(UnsafeURL):
+            resolve_pinned(
+                "reused-private-no-allowlist.example.com", validated=validated
+            )
+
+
+class TestValidatedResolutionCarriesAllowlist:
+    # F7 (MYC-4650 review round 3, HIGH regression): `validated` was built
+    # under the caller's real allowlist, but the record didn't carry it, so
+    # resolve_pinned(host, validated=v) re-validated with an EMPTY allowlist
+    # by default and raised on an allowlisted private IP that round one
+    # (assert_public_ip) had already accepted. `ValidatedResolution` now
+    # carries `allowlist_ranges`, and `resolve_pinned` falls back to it when
+    # its own `allowlist_ranges` argument is empty.
+
+    def test_validated_with_allowlist_pinned_without_returns_ip(self):
+        # (a) validated WITH allowlist, pinned WITHOUT -> returns the IP.
+        # This is the exact README-recommended pattern from url.py:20-21.
+        with patch("mycelium_security.url.socket.getaddrinfo") as mock_resolver:
+            mock_resolver.return_value = [
+                (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.42.0.7", 0)),
+            ]
+            validated = resolve_and_validate(
+                "f7-recommended-pattern.example.com",
+                allowlist_ranges=["10.0.0.0/8"],
+            )
+            pinned = resolve_pinned(
+                "f7-recommended-pattern.example.com", validated=validated
+            )
+        assert pinned == "10.42.0.7"
+
+    def test_validated_without_allowlist_pinned_with_explicit_returns_ip(self):
+        # (b) validated WITHOUT allowlist, pinned WITH explicit allowlist ->
+        # returns. An explicitly-passed allowlist_ranges at the pin site
+        # still wins over (or supplements) whatever `validated` carries.
+        with patch("mycelium_security.url.socket.getaddrinfo") as mock_resolver:
+            mock_resolver.return_value = [
+                (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.42.0.7", 0)),
+            ]
+            with pytest.raises(UnsafeURL):
+                resolve_and_validate("f7-explicit-at-pin.example.com")
+
+        validated = ValidatedResolution(
+            host="f7-explicit-at-pin.example.com",
+            ips=(ipaddress.ip_address("10.42.0.7"),),
+        )
+        pinned = resolve_pinned(
+            "f7-explicit-at-pin.example.com",
+            validated=validated,
+            allowlist_ranges=["10.0.0.0/8"],
+        )
+        assert pinned == "10.42.0.7"
+
+    def test_validated_without_pinned_without_private_ip_raises(self):
+        # (c) validated WITHOUT, pinned WITHOUT, private IP -> raises.
+        validated = ValidatedResolution(
+            host="f7-no-allowlist-anywhere.example.com",
+            ips=(ipaddress.ip_address("10.42.0.7"),),
+        )
+        with pytest.raises(UnsafeURL):
+            resolve_pinned("f7-no-allowlist-anywhere.example.com", validated=validated)
+
+    def test_hand_built_record_naming_metadata_allowlist_still_raises(self):
+        # (d) a hand-built record naming 169.254.169.254 with an allowlist
+        # covering it still raises: metadata is unconditionally blocked,
+        # regardless of what allowlist_ranges the record self-authorises.
+        validated = ValidatedResolution(
+            host="f7-hand-built-metadata-allowlist.example.com",
+            ips=(ipaddress.ip_address("169.254.169.254"),),
+            allowlist_ranges=("169.254.0.0/16",),
+        )
+        with pytest.raises(UnsafeURL, match="metadata"):
+            resolve_pinned(
+                "f7-hand-built-metadata-allowlist.example.com", validated=validated
+            )
+
+
+class TestResolvePinnedElementTypeValidation:
+    # F9 (MYC-4650 review round 3): a ValidatedResolution whose `ips` tuple
+    # contains a non-IP-address element (a str, or None) reached
+    # `_is_private_or_reserved` and raised AttributeError instead of
+    # UnsafeURL. resolve_pinned now checks element types up front.
+
+    def test_str_element_raises_unsafe_url(self):
+        validated = ValidatedResolution(
+            host="f9-str-element.example.com", ips=("1.2.3.4",)  # type: ignore[arg-type]
+        )
+        with pytest.raises(UnsafeURL):
+            resolve_pinned("f9-str-element.example.com", validated=validated)
+
+    def test_none_element_raises_unsafe_url(self):
+        validated = ValidatedResolution(
+            host="f9-none-element.example.com", ips=(None,)  # type: ignore[arg-type]
+        )
+        with pytest.raises(UnsafeURL):
+            resolve_pinned("f9-none-element.example.com", validated=validated)
+
+
+class TestResolvePinnedEmptyHost:
+    # F10 (MYC-4650 review round 3): resolve_pinned("", validated=<record
+    # with host "">) returned an IP even though assert_public_ip("") refuses
+    # empty hosts. The empty-host check is now hoisted to the top of
+    # resolve_pinned, before the `validated` branch is even considered.
+
+    def test_empty_host_with_matching_validated_record_still_raises(self):
+        validated = ValidatedResolution(
+            host="", ips=(ipaddress.ip_address("93.184.216.34"),)
+        )
+        with pytest.raises(UnsafeURL):
+            resolve_pinned("", validated=validated)
+
+    def test_empty_host_legacy_form_raises(self):
+        with pytest.raises(UnsafeURL):
+            resolve_pinned("")
