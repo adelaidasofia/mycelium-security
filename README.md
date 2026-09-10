@@ -85,12 +85,12 @@ on this second call even though `assert_public_ip` just accepted it
 (MYC-4650 review round 2). `resolve_pinned(host, validated=...)` does not
 have this trap: `ValidatedResolution` carries the `allowlist_ranges` it was
 built with, and `resolve_pinned` falls back to that carried allowlist
-whenever its own `allowlist_ranges` argument is empty — so the "Pinned-IP
-pattern" example above (`resolve_and_validate(host,
-allowlist_ranges=enterprise_onprem_cidrs)` then `resolve_pinned(host,
-validated=validated)`, with no `allowlist_ranges` repeated at the pin call)
-round-trips correctly for an Enterprise on-prem allowlisted host (MYC-4650
-review round 3, F7).
+whenever its own `allowlist_ranges` argument is omitted — so the "Pinned-IP
+pattern" above, with `allowlist_ranges=enterprise_onprem_cidrs` added to the
+`resolve_and_validate` call and nothing repeated at the pin call, round-trips
+correctly for an Enterprise on-prem allowlisted host (MYC-4650 review round 3,
+F7). Passing `allowlist_ranges=[]` explicitly narrows the pin-time check to no
+allowlist at all.
 
 ### Enterprise on-prem allowlist
 
@@ -117,7 +117,7 @@ assert_public_ip(
 | `sanitize_or_raise(url: str) -> str` | Validate URL string; reject dangerous chars + schemes + embedded creds. Raises `UnsafeURL`. |
 | `resolve_and_validate(host: str, *, allowlist_ranges: Iterable[str] = ()) -> ValidatedResolution` | **Recommended entry point.** Resolve host ONCE, raise `UnsafeURL` if any resolved IP is private / metadata / link-local / unspecified, return the validated resolution. |
 | `assert_public_ip(host: str, *, allowlist_ranges: Iterable[str] = ()) -> ValidatedResolution` | Same behavior as `resolve_and_validate` (kept as the original name). Existing callers that ignore the return value are unaffected. |
-| `resolve_pinned(host: str, *, validated: ValidatedResolution \| None = None, allowlist_ranges: Iterable[str] = ()) -> str` | With `validated=`, returns its first IP with **no new lookup** — pass the result of `resolve_and_validate`/`assert_public_ip`. Re-validates against `allowlist_ranges` if given, else `validated.allowlist_ranges`. Without `validated` (deprecated legacy form), does its own single resolution and validates it against `allowlist_ranges` before returning. |
+| `resolve_pinned(host: str, *, validated: ValidatedResolution \| None = None, allowlist_ranges: Iterable[str] | None = None) -> str` | With `validated=`, returns its first IP with **no new lookup** — pass the result of `resolve_and_validate`/`assert_public_ip`. Re-validates against `allowlist_ranges` if given, else `validated.allowlist_ranges`. Without `validated` (deprecated legacy form), does its own single resolution and validates it against `allowlist_ranges` before returning. |
 | `ValidatedResolution` | `NamedTuple` result of a validated resolution: `host: str`, `ips: tuple[ipaddress.IPv4Address \| ipaddress.IPv6Address, ...]`, `allowlist_ranges: tuple[str, ...] = ()`. |
 | `UnsafeURL` | `ValueError` subclass raised on any check failure. |
 

@@ -741,3 +741,47 @@ class TestResolvePinnedEmptyHost:
     def test_empty_host_legacy_form_raises(self):
         with pytest.raises(UnsafeURL):
             resolve_pinned("")
+
+
+class TestRoundFourFindings:
+    # MYC-4650 review round 4: F14 malformed CIDR, F15 explicit-empty narrows,
+    # F17 no zone id on the returned pin.
+
+    def _stub(self, mock_resolver, ip):
+        mock_resolver.return_value = [
+            (socket.AF_INET, socket.SOCK_STREAM, 0, "", (ip, 0)),
+        ]
+
+    @pytest.mark.parametrize("bad", ["not-a-cidr", "10.0.0.0/33", ""])
+    def test_malformed_allowlist_raises_unsafe_url_on_the_legacy_path(self, bad):
+        with patch("mycelium_security.url.socket.getaddrinfo") as mock_resolver:
+            self._stub(mock_resolver, "93.184.216.34")
+            with pytest.raises(url_module.UnsafeURL, match="invalid allowlist range"):
+                resolve_pinned("f14.example.com", allowlist_ranges=[bad])
+
+    def test_malformed_carried_allowlist_raises_unsafe_url_on_the_validated_path(self):
+        record = url_module.ValidatedResolution(
+            "f14.example.com",
+            (ipaddress.ip_address("93.184.216.34"),),
+            ("not-a-cidr",),
+        )
+        with pytest.raises(url_module.UnsafeURL, match="invalid allowlist range"):
+            resolve_pinned("f14.example.com", validated=record)
+
+    def test_explicit_empty_allowlist_narrows_at_the_pin_site(self):
+        with patch("mycelium_security.url.socket.getaddrinfo") as mock_resolver:
+            self._stub(mock_resolver, "10.42.0.7")
+            validated = resolve_and_validate(
+                "f15.example.com", allowlist_ranges=["10.0.0.0/8"]
+            )
+            # omitted -> carried allowlist applies
+            assert resolve_pinned("f15.example.com", validated=validated) == "10.42.0.7"
+            # explicit [] -> no allowlist, the private IP is refused
+            with pytest.raises(url_module.UnsafeURL):
+                resolve_pinned("f15.example.com", validated=validated, allowlist_ranges=[])
+
+    def test_returned_pin_never_carries_an_ipv6_zone_id(self):
+        record = url_module.ValidatedResolution(
+            "f17.example.com", (ipaddress.ip_address("2606:4700::1%eth0"),), ()
+        )
+        assert resolve_pinned("f17.example.com", validated=record) == "2606:4700::1"

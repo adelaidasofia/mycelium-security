@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Round 4 (review findings F13–F17)
+
+- A malformed CIDR in `allowlist_ranges` (explicit or carried on a
+  `ValidatedResolution`) now raises `UnsafeURL`, never a bare `ValueError`.
+- `resolve_pinned(..., allowlist_ranges=[])` now narrows to NO allowlist; only
+  omitting the argument falls back to the carried allowlist.
+- The returned pin string never carries an IPv6 zone id.
+
 **Security fix (MYC-4650).** `resolve_pinned(host)` re-resolved DNS instead
 of reusing the IPs `assert_public_ip(host)` already validated.
 
@@ -40,8 +48,9 @@ of reusing the IPs `assert_public_ip(host)` already validated.
   `@dataclass` dereferences `sys.modules[cls.__module__].__dict__` and
   raises `AttributeError` on `None`. Changed to `NamedTuple`, which has no
   such dependency and loads standalone on 3.10+ (the package floor;
-  measured on 3.12 and 3.14). `host`/`ips` field access and equality are
-  unchanged.
+  measured on 3.12 and 3.14). Field access by name is unchanged; the record
+  gained a third field in round 3, so `len()`, two-name tuple unpacking and
+  equality against a 2-tuple changed (see the round-3 Compatibility note).
 - **`resolve_pinned(host)` (legacy one-arg form) ignored any enterprise
   on-prem allowlist.** It hardcoded `allowlist_ranges=()` on its internal
   re-resolution, so a caller who validated a host with

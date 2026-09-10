@@ -290,7 +290,14 @@ def _validate_ips(
     both validate the SAME list of IPs the same way — never two independent
     resolutions validated by two independent code paths.
     """
-    allowed_nets = [ipaddress.ip_network(cidr, strict=False) for cidr in allowlist_ranges]
+    allowed_nets = []
+    for cidr in allowlist_ranges:
+        try:
+            allowed_nets.append(ipaddress.ip_network(cidr, strict=False))
+        except ValueError as exc:
+            # Round 4 (F14): a malformed range is a check failure, so it raises the
+            # documented type instead of leaking a bare ValueError past `except UnsafeURL`.
+            raise UnsafeURL(f"invalid allowlist range {cidr!r}: {exc}") from exc
     for ip in ips:
         # Cloud-metadata is blocked regardless of any allowlist
         if _is_metadata_endpoint(ip):
@@ -350,7 +357,7 @@ def resolve_pinned(
     host: str,
     *,
     validated: ValidatedResolution | None = None,
-    allowlist_ranges: Iterable[str] = (),
+    allowlist_ranges: Iterable[str] | None = None,
 ) -> str:
     """Return the first validated IP as a string, for pinned-IP fetches.
 
@@ -384,9 +391,10 @@ def resolve_pinned(
     they built `validated` — so the README-recommended `resolve_and_validate`
     + `resolve_pinned(host, validated=...)` pattern round-trips an
     Enterprise on-prem allowlist with no repeated argument (MYC-4650 review
-    round 3, F7). Passing `allowlist_ranges` explicitly here still wins over
-    whatever `validated` carries, for a caller that wants to widen or
-    narrow the check at the pin site.
+    round 3, F7). Passing `allowlist_ranges` explicitly here (even an empty
+    list) wins over whatever `validated` carries, for a caller that wants to
+    widen or narrow the check at the pin site; only an OMITTED argument
+    (`None`) falls back to the carried allowlist (round 4, F15).
 
     Residual risk of trusting `validated.allowlist_ranges`: a hand-built
     `ValidatedResolution` can name a private range in its own
@@ -421,9 +429,22 @@ def resolve_pinned(
         # construction, not merely by the caller's earlier good behavior.
         # An explicitly-passed `allowlist_ranges` wins; otherwise reuse the
         # allowlist `validated` itself was built with (round 3, F7).
-        effective_allowlist = tuple(allowlist_ranges) or validated.allowlist_ranges
+        effective_allowlist = (
+            validated.allowlist_ranges if allowlist_ranges is None else tuple(allowlist_ranges)
+        )
         _validate_ips(host, validated.ips, allowlist_ranges=effective_allowlist)
-        return str(validated.ips[0])
+        return _pin_string(validated.ips[0])
     ips = _resolve_all(host)
-    _validate_ips(host, ips, allowlist_ranges=allowlist_ranges)
-    return str(ips[0])
+    _validate_ips(host, ips, allowlist_ranges=() if allowlist_ranges is None else allowlist_ranges)
+    return _pin_string(ips[0])
+
+
+def _pin_string(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str:
+    """Render a pinned IP without any IPv6 zone id (round 4, F17).
+
+    `str()` on a scoped IPv6Address keeps its `%zone` suffix; a hand-built
+    record could carry one, and most transports reject or mis-route it.
+    Rebuilding from the packed bytes drops the scope without touching policy
+    (the metadata / private checks already strip it before comparing).
+    """
+    return str(ipaddress.ip_address(ip.packed))
