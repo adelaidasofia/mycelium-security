@@ -1,5 +1,47 @@
 # Changelog
 
+## v0.1.3 — 2026-09-10
+
+### Fixed
+
+- **IPv4-mapped IPv6 is now classified on the embedded IPv4 only**, the same
+  treatment NAT64 received in v0.1.2. The guard had also run the stdlib
+  properties on the OUTER form. `::/8` is in CPython's reserved registry on
+  every version, so `::ffff:8.8.8.8` read `is_reserved=True` (and
+  `is_private=True` on 3.9 before 3.9.20) until the December-2024 patch line
+  made `IPv6Address.is_reserved` / `is_private` short-circuit to the embedded
+  IPv4 for mapped addresses. On 3.13.0, 3.12.0-3.12.7, 3.11.0-3.11.10 and
+  3.10.0-3.10.15, all inside this package's declared `>=3.10` floor, a PUBLIC
+  destination such as `::ffff:8.8.8.8` was therefore blocked as "private /
+  reserved". Over-blocking, not a bypass: private, CGNAT, loopback, multicast,
+  unspecified and cloud-metadata destinations in mapped form remain blocked,
+  and a non-encoding IPv6 address still honours the outer-form properties.
+- **6to4 (`2002::/16`), Teredo (`2001::/32`) and IPv4-compatible (`::/96`)
+  are now in the explicit blocklist.** Their verdicts rode on the stdlib
+  registries: `2002::/16` only became private at the CVE-2024-4032 backport
+  (3.10.15 / 3.12.4), so 3.10.0-3.10.14 and 3.12.0-3.12.3 ALLOWED
+  `2002:808:808::` while every later patch blocked it; Teredo and
+  IPv4-compatible were blocked on every measured version but only through
+  `2001::/23` / `::/8` membership. The explicit entries make every answer
+  identical across interpreters and match what current interpreters already
+  returned.
+- **IPv4-compatible `::a.b.c.d` is now unwrapped by `_embedded_ipv4`**, so the
+  non-overridable cloud-metadata check sees `::169.254.169.254` and
+  `::100.100.100.200`. Previously an Enterprise allowlist covering `::/96`
+  waved those past the guard (found by independent review of this change;
+  pre-existing).
+- Regression tests force the pre-Dec-2024 / pre-backport property values
+  with `PropertyMock` instead of relying on the interpreter, so they fail on
+  the old code under every version in the CI matrix.
+
+### Changed
+
+- CI matrix now also runs `3.10.14`, `3.10.15`, `3.12.3`, `3.12.7` and
+  `3.13.0` (one job on each side of both stdlib boundaries: the
+  CVE-2024-4032 backport and the Dec-2024 mapped short-circuit) and `3.14`,
+  so the real stdlib behaviour is exercised on both sides, not only its
+  simulation.
+
 ## v0.1.2 — 2026-07-28
 
 ### Fixed
