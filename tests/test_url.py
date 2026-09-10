@@ -13,7 +13,8 @@ import ipaddress
 import json
 import socket
 from pathlib import Path
-from unittest.mock import patch
+from contextlib import contextmanager
+from unittest.mock import PropertyMock, patch
 
 import pytest
 
@@ -429,3 +430,153 @@ class TestResolvePinned:
                 (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("203.0.113.2", 0)),
             ]
             assert resolve_pinned("multi-record.example.com") == "203.0.113.1"
+
+
+@contextmanager
+def _outer_ipv6_properties(*, reserved: bool, private: bool):
+    """Force the OUTER-form IPv6 properties the guard used to consult.
+
+    `::/8` is in CPython's `_reserved_networks` on every version; what moved
+    is that the December-2024 patch line made `IPv6Address.is_reserved` /
+    `is_private` short-circuit to the embedded IPv4 for MAPPED addresses only,
+    and the CVE-2024-4032 backport (3.10.15 / 3.12.4) added `2002::/16` to
+    `_private_networks`. Measured 2026-09-10, one container per version. The
+    CI matrix's bare minors resolve to the latest patch, all on one side of
+    those boundaries, so a test that only calls the real interpreter is green
+    by construction. Forcing the properties pins each regression to the
+    BEHAVIOUR CLASS instead. The mocks are asserted CONSULTED inside the
+    context, so a patch on the wrong class cannot silently test nothing.
+    """
+    reserved_mock = PropertyMock(return_value=reserved)
+    private_mock = PropertyMock(return_value=private)
+    with (
+        patch.object(ipaddress.IPv6Address, "is_reserved", reserved_mock),
+        patch.object(ipaddress.IPv6Address, "is_private", private_mock),
+    ):
+        probe = ipaddress.ip_address("::ffff:8.8.8.8")
+        assert probe.is_reserved is reserved and probe.is_private is private
+        # Value equality alone is vacuous when the interpreter's real answer
+        # already matches (False/False on every post-Dec-2024 version), so the
+        # liveness proof is that the MOCKS were the ones consulted.
+        assert reserved_mock.called and private_mock.called  # patch is live
+        yield
+
+
+class TestIPv4MappedClassifiedOnInnerOnly:
+    """IPv4-mapped is a transport encoding: the outer prefix is not a destination.
+
+    Regression for MYC-4719. The guard must classify ``::ffff:a.b.c.d`` on the
+    embedded IPv4 alone, exactly as it already does for NAT64, so the verdict
+    does not change shape with the interpreter. Pre-Dec-2024 stdlib = outer
+    form reads reserved (and private on 3.9).
+    """
+
+    @pytest.mark.parametrize("mapped_public", ["::ffff:8.8.8.8", "::ffff:1.1.1.1"])
+    def test_public_mapped_allowed_even_when_outer_form_reads_reserved(self, mapped_public):
+        with _outer_ipv6_properties(reserved=True, private=True):
+            assert_public_ip(mapped_public)
+
+    @pytest.mark.parametrize(
+        "mapped_private",
+        [
+            "::ffff:10.0.0.1",          # RFC1918
+            "::ffff:127.0.0.1",         # loopback
+            "::ffff:100.64.0.1",        # CGNAT
+            "::ffff:169.254.169.254",   # cloud metadata
+            "::ffff:224.0.0.1",         # multicast
+            "::ffff:0.0.0.0",           # unspecified / "this network"
+        ],
+    )
+    def test_private_mapped_still_blocked_pinned(self, mapped_private):
+        """NEGATIVE CONTROL: inner-only classification is not fail-open."""
+        with _outer_ipv6_properties(reserved=True, private=True), pytest.raises(UnsafeURL):
+            assert_public_ip(mapped_private)
+
+    def test_non_encoding_ipv6_still_honours_the_outer_properties_pinned(self):
+        """NEGATIVE CONTROL: only NAT64 and IPv4-mapped skip the outer form.
+
+        ``4000::1`` is in no explicit blocklist entry and embeds nothing, so
+        the ONLY thing that can block it is the outer-form property check. It
+        must still fire.
+        """
+        with _outer_ipv6_properties(reserved=True, private=True), pytest.raises(UnsafeURL):
+            assert_public_ip("4000::1")
+
+
+class TestTransitionPrefixesPinnedInTheExplicitList:
+    """6to4, Teredo and IPv4-compatible are blocked by the LIST, not the interpreter.
+
+    Pre-fix, the public-6to4 verdict rode on the stdlib: `2002:808:808::`
+    (6to4 wrapping 8.8.8.8) was ALLOWED on 3.9.6 and 3.10.0 and BLOCKED from
+    3.10.15 onward, because the CVE-2024-4032 backport added `2002::/16` to
+    `_private_networks`. Teredo (`2001::/32`) and IPv4-compatible (`::/96`)
+    were blocked on every measured version, but only via `2001::/23` /
+    `::/8` membership in the stdlib registries. Forcing the outer properties
+    to FALSE proves the explicit list, not the interpreter, is doing the
+    blocking.
+    """
+
+    @pytest.mark.parametrize(
+        "outer_public",
+        [
+            "2002:808:808::",                          # 6to4 wrapping 8.8.8.8
+            "2001:0:4136:e378:8000:63bf:f7f7:f7f7",    # Teredo wrapping 8.8.8.8
+            "::8.8.8.8",                               # IPv4-compatible, deprecated form
+        ],
+    )
+    def test_blocked_even_when_outer_form_reads_global(self, outer_public):
+        with _outer_ipv6_properties(reserved=False, private=False), pytest.raises(UnsafeURL):
+            assert_public_ip(outer_public)
+
+    @pytest.mark.parametrize(
+        "wrapped_private",
+        [
+            "2002:a00:1::",     # 6to4 wrapping 10.0.0.1
+            "2002:6440:1::",    # 6to4 wrapping 100.64.0.1
+            "::10.0.0.1",       # IPv4-compatible wrapping 10.0.0.1
+        ],
+    )
+    def test_inner_check_fires_with_the_list_entries_removed(self, wrapped_private):
+        """NEGATIVE CONTROL for the INNER check, with the list out of the way.
+
+        An allowlist cannot isolate it: a match on the outer address
+        short-circuits before the private check by design (only metadata is
+        non-overridable). So the list entries are removed in-process instead;
+        with the outer properties forced FALSE the embedded-IPv4 check is the
+        only thing left that can block, and it must.
+        """
+        without_entries = tuple(
+            net for net in url_module._BLOCKED_NETS if str(net) not in {"2002::/16", "::/96"}
+        )
+        assert len(without_entries) == len(url_module._BLOCKED_NETS) - 2  # both entries exist
+        with (
+            patch.object(url_module, "_BLOCKED_NETS", without_entries),
+            _outer_ipv6_properties(reserved=False, private=False),
+            pytest.raises(UnsafeURL),
+        ):
+            assert_public_ip(wrapped_private)
+
+    @pytest.mark.parametrize("compat_metadata", ["::169.254.169.254", "::100.100.100.200"])
+    def test_ipv4_compatible_metadata_cannot_be_allowlisted(self, compat_metadata):
+        """Metadata is non-overridable in EVERY encoding. Pre-fix, `_embedded_ipv4`
+        did not unwrap the IPv4-compatible form, so an allowlist covering `::/96`
+        waved AWS / Alibaba IMDS past the guard (found by independent review)."""
+        with pytest.raises(UnsafeURL, match="cloud-metadata"):
+            assert_public_ip(compat_metadata, allowlist_ranges=["::/96"])
+
+    def test_allowlist_on_the_outer_prefix_still_overrides_non_metadata_pinned(self):
+        """Documented allowlist contract, pinned so it is not misread as a gap.
+
+        An Enterprise allowlist covering the OUTER prefix overrides the private
+        check for the embedded address; only cloud metadata is non-overridable.
+        Same semantics as `::ffff:0:0/96` over a mapped private address.
+        """
+        assert_public_ip("::10.0.0.1", allowlist_ranges=["::/96"])
+        assert_public_ip("::ffff:10.0.0.1", allowlist_ranges=["::ffff:0:0/96"])
+
+    def test_ipv4_compatible_unspecified_and_loopback_are_not_unwrapped(self):
+        """`::` and `::1` are addresses, not encodings; they stay on the
+        explicit list and never acquire an embedded IPv4."""
+        assert url_module._embedded_ipv4(ipaddress.ip_address("::")) is None
+        assert url_module._embedded_ipv4(ipaddress.ip_address("::1")) is None
+        assert url_module._embedded_ipv4(ipaddress.ip_address("::0.0.0.2")) == ipaddress.ip_address("0.0.0.2")
