@@ -46,6 +46,28 @@ _METADATA_IPS: frozenset[str] = frozenset(
 )
 
 _NAT64_NETWORK = ipaddress.ip_network("64:ff9b::/96")
+_IPV4_MAPPED_NETWORK = ipaddress.ip_network("::ffff:0:0/96")
+_IPV4_COMPATIBLE_NETWORK = ipaddress.ip_network("::/96")
+
+# Transport encodings whose OUTER prefix is an artifact of the encoding, not a
+# destination. Policy is decided on the embedded IPv4 alone.
+#
+# WHY: the stdlib's verdict on the outer form is interpreter-dependent. `::/8`
+# is in CPython's `_reserved_networks` on every version, so `::ffff:8.8.8.8`
+# read `is_reserved=True` (and `is_private=True` on 3.9 before 3.9.20) until
+# the December-2024 patch line made `IPv6Address.is_reserved` / `is_private`
+# short-circuit to the EMBEDDED IPv4 for mapped addresses only (3.13.0,
+# 3.12.0-3.12.7, 3.11.0-3.11.10 and 3.10.0-3.10.15 still blocked a public
+# mapped destination). `64:ff9b::/96` is classified reserved on every version.
+# Measured 2026-09-10, one container per version.
+#
+# 6to4, Teredo and IPv4-compatible are deliberately NOT here: they keep both
+# checks, and their outer prefixes are pinned in _BLOCKED_V6_NETWORKS so the
+# verdict does not ride on the stdlib (see the entries' comments).
+_INNER_ONLY_ENCODINGS: tuple[ipaddress.IPv6Network, ...] = (
+    _NAT64_NETWORK,
+    _IPV4_MAPPED_NETWORK,
+)
 
 
 def sanitize_or_raise(url: str) -> str:
@@ -113,7 +135,14 @@ _BLOCKED_V6_NETWORKS: tuple[str, ...] = (
     "::/128",             # unspecified
     "::1/128",            # loopback
     "100::/64",           # discard-only
+    "::/96",              # IPv4-compatible (RFC 4291 s2.5.5.1, deprecated); only `::/8`
+                          #   is_reserved blocks it otherwise, the property this module
+                          #   stopped trusting for the mapped form next door
+    "2001::/32",          # Teredo (RFC 4380); stdlib blocks it via `2001::/23` on every
+                          #   measured version, pinned so that can never change the verdict
     "2001:db8::/32",      # documentation
+    "2002::/16",          # 6to4 (RFC 3056); stdlib only reports it private from the
+                          #   CVE-2024-4032 backport (3.10.15 / 3.12.4)  <- stdlib drift
     "fc00::/7",           # unique-local
     "fe80::/10",          # link-local
     "ff00::/8",           # multicast
@@ -146,6 +175,12 @@ def _embedded_ipv4(
         return teredo[1]
     if ip in _NAT64_NETWORK:
         return ipaddress.ip_address(int(ip) & 0xFFFFFFFF)
+    if ip in _IPV4_COMPATIBLE_NETWORK and int(ip) > 1:
+        # Deprecated `::a.b.c.d` form (RFC 4291 s2.5.5.1). `::` and `::1` are
+        # not encodings and are blocked by the explicit list. Unwrapping here
+        # lets the metadata check see `::169.254.169.254`, which an allowlist
+        # covering `::/96` could otherwise wave past the private check.
+        return ipaddress.ip_address(int(ip) & 0xFFFFFFFF)
     return None
 
 
@@ -166,13 +201,16 @@ def _is_private_or_reserved(
     ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
 ) -> bool:
     inner = _embedded_ipv4(ip)
-    # NAT64 is a transport encoding whose standard outer prefix is classified
-    # reserved by the stdlib even when the embedded destination is public.
-    # Validate that actual IPv4 destination instead; metadata is checked above.
-    # Other transition formats retain both checks to avoid widening their
-    # established policy as a side effect of this NAT64 correction.
+    # NAT64 and IPv4-mapped are transport encodings (see _INNER_ONLY_ENCODINGS):
+    # validate the actual IPv4 destination, never the outer prefix, so the
+    # verdict cannot change shape with the interpreter. Metadata is checked
+    # before this function. Other transition formats retain both checks.
     candidates: list[ipaddress.IPv4Address | ipaddress.IPv6Address]
-    if inner is not None and isinstance(ip, ipaddress.IPv6Address) and ip in _NAT64_NETWORK:
+    if (
+        inner is not None
+        and isinstance(ip, ipaddress.IPv6Address)
+        and any(ip in encoding for encoding in _INNER_ONLY_ENCODINGS)
+    ):
         candidates = [inner]
     else:
         candidates = [ip]

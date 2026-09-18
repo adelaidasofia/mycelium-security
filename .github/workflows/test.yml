@@ -11,7 +11,13 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        # Bare minors resolve to the LATEST patch, all on one side of the two stdlib
+        # boundaries the guard pins (MYC-4719). The exact entries put one job on
+        # EACH side of each boundary, from the actions/python-versions manifest:
+        #   CVE-2024-4032 backport (2002::/16 becomes is_private):  3.10.14 | 3.10.15, 3.12.3 | 3.12.4+
+        #   Dec-2024 mapped short-circuit (is_reserved for ::ffff:): 3.10.15 | 3.10.16, 3.12.7 | 3.12.8, 3.13.0 | 3.13.1
+        # Drop an exact entry only when the manifest no longer carries it.
+        python-version: ["3.10.14", "3.10.15", "3.10", "3.11", "3.12.3", "3.12.7", "3.12", "3.13.0", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
