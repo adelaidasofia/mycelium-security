@@ -153,6 +153,25 @@
         "100.64.0.0/10"
       ],
       "allowed": true
+    },
+    {
+      "host": "::169.254.169.254",
+      "allowlist_ranges": [
+        "::/96"
+      ],
+      "allowed": false
+    },
+    {
+      "host": "2002:808:808::",
+      "allowlist_ranges": [],
+      "allowed": false
+    },
+    {
+      "host": "2001:0:4136:e378:8000:63bf:5601:5601",
+      "allowlist_ranges": [
+        "2001::/32"
+      ],
+      "allowed": false
     }
   ]
 }
