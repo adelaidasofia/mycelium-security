@@ -177,9 +177,12 @@ def _embedded_ipv4(
         return ipaddress.ip_address(int(ip) & 0xFFFFFFFF)
     if ip in _IPV4_COMPATIBLE_NETWORK and int(ip) > 1:
         # Deprecated `::a.b.c.d` form (RFC 4291 s2.5.5.1). `::` and `::1` are
-        # not encodings and are blocked by the explicit list. Unwrapping here
-        # lets the metadata check see `::169.254.169.254`, which an allowlist
-        # covering `::/96` could otherwise wave past the private check.
+        # not encodings and are blocked by the explicit list. Every other
+        # `::0.0.0.x` unwraps to `0.0.0.0/8`, which the explicit list blocks,
+        # and the outer form sits in `::/96`, also listed, so the guard cannot
+        # widen here. Unwrapping lets the metadata check see
+        # `::169.254.169.254`, which an allowlist covering `::/96` could
+        # otherwise wave past the private check.
         return ipaddress.ip_address(int(ip) & 0xFFFFFFFF)
     return None
 

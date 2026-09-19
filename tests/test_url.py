@@ -574,6 +574,33 @@ class TestTransitionPrefixesPinnedInTheExplicitList:
         assert_public_ip("::10.0.0.1", allowlist_ranges=["::/96"])
         assert_public_ip("::ffff:10.0.0.1", allowlist_ranges=["::ffff:0:0/96"])
 
+    @pytest.mark.parametrize(
+        "wrapped_metadata,covering_allowlist",
+        [
+            ("64:ff9b::a9fe:a9fe", "64:ff9b::/96"),   # NAT64 wrapping 169.254.169.254
+            ("64:ff9b::6464:64c8", "64:ff9b::/96"),   # NAT64 wrapping 100.100.100.200
+            ("2002:a9fe:a9fe::", "2002::/16"),        # 6to4 wrapping 169.254.169.254
+            ("2001:0:4136:e378:8000:63bf:5601:5601", "2001::/32"),  # Teredo, client 169.254.169.254
+            ("::ffff:169.254.169.254", "::ffff:0:0/96"),
+            ("::169.254.169.254", "::/96"),
+        ],
+    )
+    def test_metadata_blocked_before_allowlist_in_every_encoding(
+        self, wrapped_metadata, covering_allowlist
+    ):
+        """Metadata is checked BEFORE the allowlist for every transport encoding,
+        via the embedded IPv4, not via a prefix entry: the allowlist covers the
+        whole outer prefix, so only the metadata path can raise, and the error
+        must be the metadata one."""
+        with pytest.raises(UnsafeURL, match="cloud-metadata"):
+            assert_public_ip(wrapped_metadata, allowlist_ranges=[covering_allowlist])
+
+    def test_ipv4_compatible_low_values_are_blocked_after_unwrap(self):
+        """`::0.0.0.2` unwraps to `0.0.0.2` (in `0.0.0.0/8`) and its outer form
+        is in `::/96`; both paths block, so the `int(ip) > 1` guard cannot widen."""
+        with pytest.raises(UnsafeURL):
+            assert_public_ip("::0.0.0.2")
+
     def test_ipv4_compatible_unspecified_and_loopback_are_not_unwrapped(self):
         """`::` and `::1` are addresses, not encodings; they stay on the
         explicit list and never acquire an embedded IPv4."""
